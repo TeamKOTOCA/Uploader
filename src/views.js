@@ -36,7 +36,7 @@ ${extraHead}
 }
 
 function errorPage({ message, actor, title = 'エラー' }) {
-  return layout({ title, actor, body: `<section class="card"><p class="notice-error">${escapeHtml(message)}</p></section>` });
+  return layout({ title, actor, body: `<section class="card"><h2>${escapeHtml(title)}</h2><p class="notice-error">${escapeHtml(message)}</p><p><a class="btn secondary" href="javascript:history.back()">前のページに戻る</a> <a class="btn secondary" href="/">トップへ</a></p></section>` });
 }
 
 function homePage({ actor, boxes }) {
@@ -88,8 +88,8 @@ function boxFormFields(box = {}) {
     <label>アクセントカラー<input type="color" name="accentColor" value="${escapeHtml(box.accent_color || '#2563eb')}" /></label>
     <label>追加CSS（任意）<textarea name="customCss" rows="4" maxlength="1500">${escapeHtml(box.custom_css || '')}</textarea></label>
     <label>許可拡張子（例: png,jpg,pdf）<input name="allowedExtensions" required value="${escapeHtml(box.allowed_extensions || '')}" /></label>
-    <label>最大ファイルサイズ(MB)<input type="number" name="maxFileSizeMb" min="1" max="500" value="${box.max_file_size_mb || 20}" required /></label>
-    <label>最大ファイル数/回<input type="number" name="maxFilesPerUpload" min="1" max="50" value="${box.max_files_per_upload || 5}" required /></label>
+    <label>最大ファイルサイズ(MB / 0または空で無制限)<input type="number" name="maxFileSizeMb" min="0" max="4096" value="${box.max_file_size_mb || 0}" /></label>
+    <label>最大ファイル数/回<input type="number" name="maxFilesPerUpload" min="1" max="1000" value="${box.max_files_per_upload || 20}" required /></label>
     <label>最大総アップロード件数（任意）<input type="number" name="maxTotalFiles" min="1" max="100000" value="${box.max_total_files || ''}" /></label>
     <label>受付期限（任意）<input type="datetime-local" name="expiresAt" value="${expiresValue}" /></label>
     <label><input type="checkbox" name="requireUploaderName" value="1" ${box.require_uploader_name ? 'checked' : ''} /> 送信者名を必須にする</label>
@@ -105,7 +105,7 @@ function adminDashboardPage({ actor, boxes, admins, viewers }) {
     <tr>
       <td>${box.id}</td><td>${escapeHtml(box.title)}</td><td><a href="/box/${escapeHtml(box.slug)}">${escapeHtml(box.slug)}</a></td>
       <td>${escapeHtml(box.allowed_extensions)}</td>
-      <td>${box.max_file_size_mb}MB / ${box.max_files_per_upload}件 / 総数${box.max_total_files || '無制限'}</td>
+      <td>${box.max_file_size_mb ? `${box.max_file_size_mb}MB` : '無制限'} / ${box.max_files_per_upload}件 / 総数${box.max_total_files || '無制限'}</td>
       <td>${box.require_uploader_name ? '必須' : '任意'}</td>
       <td>${box.require_uploader_note ? '必須' : '任意'}</td>
       <td>${box.font_family || 'system'} / ${escapeHtml(box.accent_color || '#2563eb')}</td>
@@ -162,7 +162,7 @@ function boxPublicPage({ actor, box, currentCount }) {
     title: `アップロード: ${box.title}`,
     actor,
     extraHead,
-    body: `<section class="card">${box.header_image_path ? `<img class="box-header" src="/box-assets/${encodeURIComponent(box.header_image_path)}" alt="header" />` : ''}<h2>${escapeHtml(box.title)}</h2><p class="muted">${escapeHtml(box.description || '説明なし')}</p>${box.public_notice ? `<p class="notice-info">${escapeHtml(box.public_notice)}</p>` : ''}<p>許可形式: <span class="kbd">${escapeHtml(box.allowed_extensions)}</span> / 最大サイズ: <span class="kbd">${box.max_file_size_mb}MB</span> / 最大数: <span class="kbd">${box.max_files_per_upload}</span> / 現在件数: <span class="kbd">${currentCount}${box.max_total_files ? ` / ${box.max_total_files}` : ''}</span></p><form method="post" action="/box/${encodeURIComponent(box.slug)}/upload" enctype="multipart/form-data">${box.password_hash ? '<label>募集ボックスパスワード<input type="password" name="boxPassword" required /></label>' : ''}${box.require_uploader_name ? '<label>送信者名<input name="uploaderName" maxlength="100" required /></label>' : '<label>送信者名（任意）<input name="uploaderName" maxlength="100" /></label>'}${box.require_uploader_note ? '<label>メモ<input name="uploaderNote" maxlength="200" required /></label>' : '<label>メモ（任意）<textarea name="uploaderNote" rows="2" maxlength="200"></textarea></label>'}<label>ファイル<input type="file" name="files" multiple required /></label><button class="btn" type="submit">アップロード</button></form></section>`,
+    body: `<section class="card">${box.header_image_path ? `<img class="box-header" src="/box-assets/${encodeURIComponent(box.header_image_path)}" alt="header" />` : ''}<h2>${escapeHtml(box.title)}</h2><p class="muted">${escapeHtml(box.description || '説明なし')}</p>${box.public_notice ? `<p class="notice-info">${escapeHtml(box.public_notice)}</p>` : ''}<p>許可形式: <span class="kbd">${escapeHtml(box.allowed_extensions)}</span> / 最大サイズ: <span class="kbd">${box.max_file_size_mb ? `${box.max_file_size_mb}MB` : '無制限'}</span> / 最大数: <span class="kbd">${box.max_files_per_upload}</span> / 現在件数: <span class="kbd">${currentCount}${box.max_total_files ? ` / ${box.max_total_files}` : ''}</span></p><form method="post" action="/box/${encodeURIComponent(box.slug)}/upload" enctype="multipart/form-data">${box.password_hash ? '<label>募集ボックスパスワード<input type="password" name="boxPassword" required /></label>' : ''}${box.require_uploader_name ? '<label>送信者名<input name="uploaderName" maxlength="100" required /></label>' : '<label>送信者名（任意）<input name="uploaderName" maxlength="100" /></label>'}${box.require_uploader_note ? '<label>メモ<input name="uploaderNote" maxlength="200" required /></label>' : '<label>メモ（任意）<textarea name="uploaderNote" rows="2" maxlength="200"></textarea></label>'}<label>ファイル<input type="file" name="files" multiple required /></label><button class="btn" type="submit">アップロード</button></form></section>`,
   });
 }
 

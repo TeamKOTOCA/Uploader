@@ -3,7 +3,7 @@
 ## 1. 構成
 - `src/server.js`: ルーティング、認証、DB、アップロード処理
 - `src/views.js`: HTMLレンダリング（server.js から分離）
-- `public/styles.css`: モダンUIスタイル
+- `public/styles.css`: 白/黄/黒ベースのフラットUIスタイル
 - `public/app.js`: 管理UI補助（リンクコピー）
 - `uploads/headers`: ボックスヘッダー画像
 
@@ -56,3 +56,8 @@ docker compose up -d --build
 - `app.set('trust proxy', true)` 有効
 - IPは `cf-connecting-ip` 優先
 - `/healthz` で死活監視可能
+
+
+## 9. 大容量ファイル対応
+- ボックスの `max_file_size_mb` は `NULL/0` を無制限として扱います。
+- 2GB前後のファイルを扱う場合は、リバースプロキシやトンネル側のアップロード制限値も調整してください。

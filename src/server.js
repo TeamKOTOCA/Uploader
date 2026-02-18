@@ -255,7 +255,7 @@ function normalizeBoxInput(body) {
     title: (body.title || '').trim(),
     description: (body.description || '').trim(),
     extList,
-    maxFileSizeMb: Number.parseInt(body.maxFileSizeMb, 10),
+    maxFileSizeMb: toNonNegativeInt(body.maxFileSizeMb, 0),
     maxFilesPerUpload: Number.parseInt(body.maxFilesPerUpload, 10),
     maxTotalFiles: body.maxTotalFiles ? Number.parseInt(body.maxTotalFiles, 10) : null,
     boxPassword: (body.boxPassword || '').trim(),
@@ -270,6 +270,12 @@ function normalizeBoxInput(body) {
     customCss: (body.customCss || '').trim().slice(0, 1500),
     successRedirectUrl: (body.successRedirectUrl || '').trim(),
   };
+}
+
+function toNonNegativeInt(value, fallback = 0) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 function detectPreviewType(file) {
@@ -474,7 +480,7 @@ function saveBoxHandler(mode) {
       if (err) return res.status(400).send(views.errorPage({ actor: admin, message: err.message }));
 
       const input = normalizeBoxInput(req.body);
-      if (!input.title || input.extList.length === 0 || !Number.isInteger(input.maxFileSizeMb) || !Number.isInteger(input.maxFilesPerUpload)) {
+      if (!input.title || input.extList.length === 0 || !Number.isInteger(input.maxFilesPerUpload) || input.maxFilesPerUpload < 1) {
         if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
         return res.status(400).send(views.errorPage({ actor: admin, message: '入力値が不正です。' }));
       }
@@ -599,7 +605,15 @@ app.get('/box/:slug', async (req, res) => {
   return res.send(views.boxPublicPage({ actor, box, currentCount: currentCount.c }));
 });
 
-app.post('/box/:slug/upload', upload.array('files', 50), async (req, res) => {
+app.post('/box/:slug/upload', (req, res, next) => {
+  upload.array('files')(req, res, (err) => {
+    if (!err) return next();
+    if (err instanceof multer.MulterError) {
+      return res.status(400).send(views.errorPage({ title: 'アップロード失敗', message: `アップロード処理エラー: ${err.message}` }));
+    }
+    return res.status(400).send(views.errorPage({ title: 'アップロード失敗', message: err.message || 'アップロード処理に失敗しました。' }));
+  });
+}, async (req, res) => {
   const actor = await resolveActor(req);
   const box = await get('SELECT * FROM boxes WHERE slug = ?', [req.params.slug]);
   if (!box || !box.is_active || isBoxExpired(box)) return res.status(404).send(views.errorPage({ actor, title: 'Not Found', message: '募集ボックスが存在しないか停止/期限切れです。' }));
@@ -636,21 +650,25 @@ app.post('/box/:slug/upload', upload.array('files', 50), async (req, res) => {
       cleanup();
       return res.status(400).send(views.errorPage({ actor, title: 'アップロード失敗', message: `許可されていない拡張子: ${file.originalname}` }));
     }
-    if (file.size > box.max_file_size_mb * 1024 * 1024) {
+    if (box.max_file_size_mb && file.size > box.max_file_size_mb * 1024 * 1024) {
       cleanup();
       return res.status(400).send(views.errorPage({ actor, title: 'アップロード失敗', message: `サイズ超過: ${file.originalname}` }));
     }
   }
 
-  for (const file of files) {
-    await run(
-      'INSERT INTO uploaded_files (box_id, uploader_name, uploader_note, original_name, stored_name, mime_type, size_bytes, uploader_ip, uploaded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [box.id, uploaderName || null, uploaderNote || null, file.originalname, path.basename(file.path), file.mimetype, file.size, getClientIp(req), nowIso()],
-    );
+  try {
+    for (const file of files) {
+      await run(
+        'INSERT INTO uploaded_files (box_id, uploader_name, uploader_note, original_name, stored_name, mime_type, size_bytes, uploader_ip, uploaded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [box.id, uploaderName || null, uploaderNote || null, file.originalname, path.basename(file.path), file.mimetype, file.size, getClientIp(req), nowIso()],
+      );
+    }
+    await postDiscordNotification(box.discord_webhook_url, box.title, files, uploaderName);
+    return res.send(views.uploadDonePage({ actor, box, count: files.length }));
+  } catch (err) {
+    cleanup();
+    return res.status(500).send(views.errorPage({ actor, title: 'アップロード失敗', message: '保存処理でエラーが発生しました。時間をおいて再試行してください。' }));
   }
-
-  await postDiscordNotification(box.discord_webhook_url, box.title, files, uploaderName);
-  return res.send(views.uploadDonePage({ actor, box, count: files.length }));
 });
 
 async function getAuthorizedFile(req, fileId) {
@@ -714,6 +732,20 @@ app.get('/files/:id/raw', async (req, res) => {
   if (!fs.existsSync(full)) return res.status(404).send('Not Found');
   if (file.mime_type) res.type(file.mime_type);
   return res.sendFile(full);
+});
+
+
+app.use(async (req, res) => {
+  const actor = await resolveActor(req);
+  res.status(404).send(views.errorPage({ actor, title: 'Not Found', message: 'ページが見つかりません。URLを確認してください。' }));
+});
+
+app.use(async (err, req, res, _next) => {
+  const actor = await resolveActor(req);
+  if (err instanceof multer.MulterError) {
+    return res.status(400).send(views.errorPage({ actor, title: 'リクエストエラー', message: `アップロード処理エラー: ${err.message}` }));
+  }
+  return res.status(500).send(views.errorPage({ actor, title: 'サーバーエラー', message: '予期しないエラーが発生しました。' }));
 });
 
 initDb().then(async () => {
