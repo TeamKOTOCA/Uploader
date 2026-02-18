@@ -4,52 +4,47 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const views = require('./views');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = path.join(__dirname, '..', 'data');
-const UPLOAD_DIR = path.join(__dirname, '..', 'uploads');
+const UPLOAD_DIR = path.join(DATA_DIR, '..', 'uploads');
+const HEADER_DIR = path.join(UPLOAD_DIR, 'headers');
 const DB_PATH = path.join(DATA_DIR, 'uploader.db');
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+fs.mkdirSync(HEADER_DIR, { recursive: true });
 
 const db = new sqlite3.Database(DB_PATH);
 
 function run(sql, params = []) {
   return new Promise((resolve, reject) => {
     db.run(sql, params, function onRun(err) {
-      if (err) {
-        reject(err);
-        return;
-      }
-      resolve(this);
+      if (err) return reject(err);
+      return resolve(this);
     });
   });
 }
 
 function get(sql, params = []) {
   return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
-      if (err) {
-        reject(err);
-        return;
-      }
-      resolve(row);
-    });
+    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row)));
   });
 }
 
 function all(sql, params = []) {
   return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) {
-        reject(err);
-        return;
-      }
-      resolve(rows);
-    });
+    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows)));
   });
+}
+
+async function ensureColumn(table, column, definition) {
+  const columns = await all(`PRAGMA table_info(${table})`);
+  if (!columns.some((entry) => entry.name === column)) {
+    await run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
 }
 
 async function initDb() {
@@ -60,7 +55,6 @@ async function initDb() {
     password_salt TEXT NOT NULL,
     created_at TEXT NOT NULL
   )`);
-
   await run(`CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     token_hash TEXT UNIQUE NOT NULL,
@@ -69,7 +63,6 @@ async function initDb() {
     expires_at TEXT NOT NULL,
     FOREIGN KEY(admin_id) REFERENCES admins(id)
   )`);
-
   await run(`CREATE TABLE IF NOT EXISTS boxes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
@@ -86,10 +79,11 @@ async function initDb() {
     created_at TEXT NOT NULL,
     FOREIGN KEY(created_by_admin_id) REFERENCES admins(id)
   )`);
-
   await run(`CREATE TABLE IF NOT EXISTS uploaded_files (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     box_id INTEGER NOT NULL,
+    uploader_name TEXT,
+    uploader_note TEXT,
     original_name TEXT NOT NULL,
     stored_name TEXT NOT NULL,
     mime_type TEXT,
@@ -98,6 +92,45 @@ async function initDb() {
     uploaded_at TEXT NOT NULL,
     FOREIGN KEY(box_id) REFERENCES boxes(id)
   )`);
+
+  await run(`CREATE TABLE IF NOT EXISTS box_viewers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    password_salt TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    created_by_admin_id INTEGER,
+    FOREIGN KEY(created_by_admin_id) REFERENCES admins(id)
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS viewer_box_permissions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    viewer_id INTEGER NOT NULL,
+    box_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(viewer_id, box_id),
+    FOREIGN KEY(viewer_id) REFERENCES box_viewers(id),
+    FOREIGN KEY(box_id) REFERENCES boxes(id)
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS viewer_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash TEXT UNIQUE NOT NULL,
+    viewer_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    FOREIGN KEY(viewer_id) REFERENCES box_viewers(id)
+  )`);
+
+  await ensureColumn('boxes', 'header_image_path', 'TEXT');
+  await ensureColumn('boxes', 'public_notice', 'TEXT');
+  await ensureColumn('boxes', 'success_message', "TEXT DEFAULT 'アップロードありがとうございました。'");
+  await ensureColumn('boxes', 'require_uploader_name', 'INTEGER NOT NULL DEFAULT 0');
+  await ensureColumn('boxes', 'max_total_files', 'INTEGER');
+  await ensureColumn('boxes', 'expires_at', 'TEXT');
+  await ensureColumn('boxes', 'font_family', "TEXT DEFAULT 'system'");
+  await ensureColumn('boxes', 'accent_color', "TEXT DEFAULT '#2563eb'");
+  await ensureColumn('boxes', 'custom_css', 'TEXT');
+  await ensureColumn('boxes', 'require_uploader_note', 'INTEGER NOT NULL DEFAULT 0');
+  await ensureColumn('boxes', 'success_redirect_url', 'TEXT');
 }
 
 function nowIso() {
@@ -105,81 +138,81 @@ function nowIso() {
 }
 
 function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
-  const hash = crypto.pbkdf2Sync(password, salt, 120000, 64, 'sha512').toString('hex');
-  return { salt, hash };
+  return { salt, hash: crypto.pbkdf2Sync(password, salt, 120000, 64, 'sha512').toString('hex') };
 }
 
 function safeCompare(a, b) {
   const aBuffer = Buffer.from(a, 'hex');
   const bBuffer = Buffer.from(b, 'hex');
-  if (aBuffer.length !== bBuffer.length) {
-    return false;
-  }
-  return crypto.timingSafeEqual(aBuffer, bBuffer);
-}
-
-function escapeHtml(value = '') {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+  return aBuffer.length === bBuffer.length && crypto.timingSafeEqual(aBuffer, bBuffer);
 }
 
 function parseCookies(req) {
   const raw = req.headers.cookie || '';
   return raw.split(';').reduce((acc, item) => {
     const [key, ...rest] = item.trim().split('=');
-    if (!key) {
-      return acc;
-    }
-    acc[key] = decodeURIComponent(rest.join('='));
+    if (key) acc[key] = decodeURIComponent(rest.join('='));
     return acc;
   }, {});
 }
 
 function setCookie(res, name, value, maxAgeSeconds) {
-  res.setHeader('Set-Cookie', `${name}=${encodeURIComponent(value)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAgeSeconds}`);
+  const prev = res.getHeader('Set-Cookie');
+  const next = `${name}=${encodeURIComponent(value)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAgeSeconds}`;
+  if (!prev) {
+    res.setHeader('Set-Cookie', [next]);
+    return;
+  }
+  res.setHeader('Set-Cookie', Array.isArray(prev) ? [...prev, next] : [prev, next]);
 }
 
 function clearCookie(res, name) {
-  res.setHeader('Set-Cookie', `${name}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0`);
-}
-
-function renderActionBar(admin) {
-  if (admin) {
-    return `
-    <div class="nav-actions">
-      <span>ログイン中: <strong>${escapeHtml(admin.username)}</strong></span>
-      <a class="btn secondary" href="/admin">管理画面</a>
-      <form class="inline-form" method="post" action="/admin/logout"><button class="btn secondary" type="submit">ログアウト</button></form>
-    </div>`;
+  const prev = res.getHeader('Set-Cookie');
+  const next = `${name}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0`;
+  if (!prev) {
+    res.setHeader('Set-Cookie', [next]);
+    return;
   }
-  return '<div class="nav-actions"><a class="btn secondary" href="/admin/login">管理者ログイン</a></div>';
+  res.setHeader('Set-Cookie', Array.isArray(prev) ? [...prev, next] : [prev, next]);
 }
 
-function pageTemplate(title, body, admin = null) {
-  return `<!doctype html>
-<html lang="ja">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>${escapeHtml(title)}</title>
-  <link rel="stylesheet" href="/assets/styles.css" />
-</head>
-<body>
-  <header class="topbar">
-    <div class="container topbar-inner">
-      <div class="brand"><a href="/">Uploader</a></div>
-      ${renderActionBar(admin)}
-    </div>
-  </header>
-  <main class="container">
-    ${body}
-  </main>
-</body>
-</html>`;
+async function createSession(table, ownerField, ownerId) {
+  const token = crypto.randomBytes(32).toString('hex');
+  await run(
+    `INSERT INTO ${table} (token_hash, ${ownerField}, created_at, expires_at) VALUES (?, ?, ?, ?)`,
+    [crypto.createHash('sha256').update(token).digest('hex'), ownerId, nowIso(), new Date(Date.now() + (1000 * 60 * 60 * 24 * 14)).toISOString()],
+  );
+  return token;
+}
+
+async function getAdminFromRequest(req) {
+  const token = parseCookies(req).admin_session;
+  if (!token) return null;
+  const session = await get(
+    'SELECT sessions.id AS session_id, sessions.expires_at, admins.id, admins.username FROM sessions INNER JOIN admins ON admins.id = sessions.admin_id WHERE sessions.token_hash = ?',
+    [crypto.createHash('sha256').update(token).digest('hex')],
+  );
+  if (!session) return null;
+  if (new Date(session.expires_at).getTime() < Date.now()) {
+    await run('DELETE FROM sessions WHERE id = ?', [session.session_id]);
+    return null;
+  }
+  return { id: session.id, username: session.username, role: 'admin' };
+}
+
+async function getViewerFromRequest(req) {
+  const token = parseCookies(req).viewer_session;
+  if (!token) return null;
+  const session = await get(
+    'SELECT viewer_sessions.id AS session_id, viewer_sessions.expires_at, box_viewers.id, box_viewers.username FROM viewer_sessions INNER JOIN box_viewers ON box_viewers.id = viewer_sessions.viewer_id WHERE viewer_sessions.token_hash = ?',
+    [crypto.createHash('sha256').update(token).digest('hex')],
+  );
+  if (!session) return null;
+  if (new Date(session.expires_at).getTime() < Date.now()) {
+    await run('DELETE FROM viewer_sessions WHERE id = ?', [session.session_id]);
+    return null;
+  }
+  return { id: session.id, username: session.username, role: 'viewer' };
 }
 
 function redirect(res, to) {
@@ -189,369 +222,402 @@ function redirect(res, to) {
 function requireAdmin(handler) {
   return async (req, res) => {
     const admin = await getAdminFromRequest(req);
-    if (!admin) {
-      redirect(res, '/admin/login');
-      return;
-    }
-    await handler(req, res, admin);
+    if (!admin) return redirect(res, '/admin/login');
+    return handler(req, res, admin);
   };
 }
 
 function uniqueSlug(text) {
-  return text
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '') || crypto.randomBytes(4).toString('hex');
+  return text.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || crypto.randomBytes(4).toString('hex');
 }
 
-async function postDiscordNotification(webhookUrl, boxTitle, files) {
-  if (!webhookUrl) {
-    return;
-  }
-  const content = `📦 募集ボックス「${boxTitle}」に ${files.length} 件のファイルがアップロードされました\n${files.map((f) => `- ${f.originalname} (${Math.round(f.size / 1024)} KB)`).join('\n')}`;
+function isBoxExpired(box) {
+  if (!box.expires_at) return false;
+  const t = new Date(box.expires_at).getTime();
+  return Number.isFinite(t) && t < Date.now();
+}
+
+function getClientIp(req) {
+  return req.headers['cf-connecting-ip'] || req.ip || '';
+}
+
+function normalizeHexColor(value, fallback = '#2563eb') {
+  return /^#[0-9a-fA-F]{6}$/.test(value || '') ? value : fallback;
+}
+
+function normalizeFontFamily(value) {
+  return ['system', 'sans', 'serif', 'mono'].includes(value) ? value : 'system';
+}
+
+function normalizeBoxInput(body) {
+  const extList = (body.allowedExtensions || '').split(',').map((v) => v.trim().toLowerCase().replace(/^\./, '')).filter((v) => /^[a-z0-9]+$/.test(v));
+  return {
+    title: (body.title || '').trim(),
+    description: (body.description || '').trim(),
+    extList,
+    maxFileSizeMb: Number.parseInt(body.maxFileSizeMb, 10),
+    maxFilesPerUpload: Number.parseInt(body.maxFilesPerUpload, 10),
+    maxTotalFiles: body.maxTotalFiles ? Number.parseInt(body.maxTotalFiles, 10) : null,
+    boxPassword: (body.boxPassword || '').trim(),
+    discordWebhookUrl: (body.discordWebhookUrl || '').trim(),
+    publicNotice: (body.publicNotice || '').trim(),
+    successMessage: (body.successMessage || 'アップロードありがとうございました。').trim(),
+    requireUploaderName: body.requireUploaderName ? 1 : 0,
+    requireUploaderNote: body.requireUploaderNote ? 1 : 0,
+    expiresAt: (body.expiresAt || '').trim(),
+    fontFamily: normalizeFontFamily(body.fontFamily),
+    accentColor: normalizeHexColor(body.accentColor),
+    customCss: (body.customCss || '').trim().slice(0, 1500),
+    successRedirectUrl: (body.successRedirectUrl || '').trim(),
+  };
+}
+
+function detectPreviewType(file) {
+  const mime = (file.mime_type || '').toLowerCase();
+  const ext = path.extname(file.original_name || '').toLowerCase();
+  if (mime.startsWith('image/')) return 'image';
+  if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('audio/')) return 'audio';
+  if (mime === 'application/pdf' || ext === '.pdf') return 'pdf';
+  if (mime.startsWith('text/') || ['.txt', '.md', '.csv', '.json', '.log'].includes(ext)) return 'text';
+  return 'none';
+}
+
+async function canViewerAccessBox(viewerId, boxId) {
+  const permission = await get('SELECT id FROM viewer_box_permissions WHERE viewer_id = ? AND box_id = ?', [viewerId, boxId]);
+  return Boolean(permission);
+}
+
+async function resolveActor(req) {
+  const admin = await getAdminFromRequest(req);
+  if (admin) return admin;
+  return getViewerFromRequest(req);
+}
+
+async function postDiscordNotification(webhookUrl, boxTitle, files, uploaderName = '') {
+  if (!webhookUrl) return;
+  const content = `📦 募集ボックス「${boxTitle}」に ${files.length} 件のファイルがアップロードされました\n送信者: ${uploaderName || '未入力'}\n${files.map((f) => `- ${f.originalname} (${Math.round(f.size / 1024)} KB)`).join('\n')}`;
   try {
-    await fetch(webhookUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content }),
-    });
+    await fetch(webhookUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }) });
   } catch (_) {
     // noop
   }
 }
 
-async function getAdminFromRequest(req) {
-  const cookies = parseCookies(req);
-  const rawToken = cookies.admin_session;
-  if (!rawToken) {
-    return null;
-  }
-
-  const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
-  const session = await get(
-    `SELECT sessions.id AS session_id, sessions.admin_id, sessions.expires_at, admins.username, admins.id
-     FROM sessions
-     INNER JOIN admins ON admins.id = sessions.admin_id
-     WHERE sessions.token_hash = ?`,
-    [tokenHash],
-  );
-
-  if (!session) {
-    return null;
-  }
-  if (new Date(session.expires_at).getTime() < Date.now()) {
-    await run('DELETE FROM sessions WHERE id = ?', [session.session_id]);
-    return null;
-  }
-
-  return { id: session.id, username: session.username, sessionId: session.session_id };
-}
-
+app.set('trust proxy', true);
 app.use(express.urlencoded({ extended: false }));
 app.use('/assets', express.static(path.join(__dirname, '..', 'public')));
+app.use('/box-assets', express.static(HEADER_DIR));
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (_, __, cb) => cb(null, UPLOAD_DIR),
+    filename: (_, file, cb) => cb(null, `${Date.now()}-${crypto.randomBytes(6).toString('hex')}${path.extname(file.originalname).toLowerCase()}`),
+  }),
+});
+
+const headerUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_, __, cb) => cb(null, HEADER_DIR),
+    filename: (_, file, cb) => cb(null, `${Date.now()}-${crypto.randomBytes(6).toString('hex')}${path.extname(file.originalname).toLowerCase()}`),
+  }),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (['.png', '.jpg', '.jpeg', '.webp', '.gif'].includes(ext)) return cb(null, true);
+    return cb(new Error('画像形式は png/jpg/jpeg/webp/gif のみ対応です。'));
+  },
+});
+
+app.get('/healthz', (_, res) => res.json({ ok: true, now: nowIso() }));
 
 app.get('/', async (req, res) => {
-  const admin = await getAdminFromRequest(req);
-  const boxes = await all('SELECT title, slug, description, is_active FROM boxes ORDER BY id DESC');
-
-  const boxHtml = boxes.map((box) => `
-    <article class="box-item">
-      <h3>${escapeHtml(box.title)}</h3>
-      <p class="muted">${escapeHtml(box.description || '説明なし')}</p>
-      <p><span class="status-pill ${box.is_active ? '' : 'off'}">${box.is_active ? '公開中' : '停止中'}</span></p>
-      <a class="btn" href="/box/${encodeURIComponent(box.slug)}">アップロードページ</a>
-    </article>
-  `).join('');
-
-  res.send(pageTemplate('トップ', `
-    <section class="card">
-      <h2>アップロード募集ボックス</h2>
-      <p class="muted">リンクを受け取った利用者は、ボックスごとの制限内でファイルを送信できます。</p>
-    </section>
-    <section class="box-list">
-      ${boxHtml || '<div class="card"><p>まだ募集ボックスがありません。</p></div>'}
-    </section>
-  `, admin));
+  const actor = await resolveActor(req);
+  const boxes = (await all('SELECT title, slug, description, is_active, expires_at, header_image_path FROM boxes ORDER BY id DESC')).map((b) => ({ ...b, is_expired: isBoxExpired(b) }));
+  return res.send(views.homePage({ actor, boxes }));
 });
 
 app.get('/admin/register', async (req, res) => {
-  const admin = await getAdminFromRequest(req);
+  const actor = await resolveActor(req);
   const count = await get('SELECT COUNT(*) AS c FROM admins');
-
-  if (count.c > 0 && !admin) {
-    res.status(403).send(pageTemplate('管理者登録不可', '<section class="card"><p class="notice-error">初回作成後はログイン済み管理者のみ追加できます。</p></section>'));
-    return;
+  if (count.c > 0 && (!actor || actor.role !== 'admin')) {
+    return res.status(403).send(views.errorPage({ title: '管理者登録不可', message: '初回作成後はログイン済み管理者のみ追加できます。', actor }));
   }
-
-  res.send(pageTemplate('管理者登録', `
-    <section class="card">
-      <h2>管理者登録</h2>
-      <form method="post" action="/admin/register">
-        <label>ユーザー名<input name="username" required minlength="3" maxlength="64" /></label>
-        <label>パスワード<input type="password" name="password" required minlength="8" maxlength="128" /></label>
-        <button class="btn" type="submit">作成</button>
-      </form>
-    </section>
-  `, admin));
+  return res.send(views.adminRegisterPage({ actor }));
 });
 
 app.post('/admin/register', async (req, res) => {
   const { username = '', password = '' } = req.body;
   const cleanUser = username.trim();
-  if (!cleanUser || password.length < 8) {
-    res.status(400).send(pageTemplate('エラー', '<section class="card"><p class="notice-error">入力が不正です。</p></section>'));
-    return;
-  }
-
+  if (!cleanUser || password.length < 8) return res.status(400).send(views.errorPage({ message: '入力が不正です。' }));
   const count = await get('SELECT COUNT(*) AS c FROM admins');
-  const sessionAdmin = await getAdminFromRequest(req);
-  if (count.c > 0 && !sessionAdmin) {
-    res.status(403).send(pageTemplate('エラー', '<section class="card"><p class="notice-error">権限がありません。</p></section>'));
-    return;
-  }
-
+  const actor = await resolveActor(req);
+  if (count.c > 0 && (!actor || actor.role !== 'admin')) return res.status(403).send(views.errorPage({ message: '権限がありません。', actor }));
   const { salt, hash } = hashPassword(password);
   try {
     const result = await run('INSERT INTO admins (username, password_hash, password_salt, created_at) VALUES (?, ?, ?, ?)', [cleanUser, hash, salt, nowIso()]);
-    const token = await createSession(result.lastID);
-    setCookie(res, 'admin_session', token, 60 * 60 * 24 * 14);
-    redirect(res, '/admin');
+    setCookie(res, 'admin_session', await createSession('sessions', 'admin_id', result.lastID), 60 * 60 * 24 * 14);
+    clearCookie(res, 'viewer_session');
+    return redirect(res, '/admin');
   } catch (_) {
-    res.status(400).send(pageTemplate('エラー', '<section class="card"><p class="notice-error">同名ユーザーが存在します。</p></section>'));
+    return res.status(400).send(views.errorPage({ message: '同名ユーザーが存在します。', actor }));
   }
 });
 
-async function createSession(adminId) {
-  const token = crypto.randomBytes(32).toString('hex');
-  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-  const createdAt = nowIso();
-  const expiresAt = new Date(Date.now() + (1000 * 60 * 60 * 24 * 14)).toISOString();
-  await run('INSERT INTO sessions (token_hash, admin_id, created_at, expires_at) VALUES (?, ?, ?, ?)', [tokenHash, adminId, createdAt, expiresAt]);
-  return token;
-}
-
 app.get('/admin/login', async (req, res) => {
   const admin = await getAdminFromRequest(req);
-  if (admin) {
-    redirect(res, '/admin');
-    return;
-  }
-
-  res.send(pageTemplate('管理者ログイン', `
-    <section class="card">
-      <h2>管理者ログイン</h2>
-      <form method="post" action="/admin/login">
-        <label>ユーザー名<input name="username" required /></label>
-        <label>パスワード<input type="password" name="password" required /></label>
-        <button class="btn" type="submit">ログイン</button>
-      </form>
-    </section>
-  `));
+  if (admin) return redirect(res, '/admin');
+  return res.send(views.adminLoginPage({ actor: await resolveActor(req) }));
 });
 
 app.post('/admin/login', async (req, res) => {
   const { username = '', password = '' } = req.body;
   const adminRow = await get('SELECT * FROM admins WHERE username = ?', [username.trim()]);
-  if (!adminRow) {
-    res.status(401).send(pageTemplate('ログイン失敗', '<section class="card"><p class="notice-error">認証に失敗しました。</p></section>'));
-    return;
-  }
-
+  if (!adminRow) return res.status(401).send(views.errorPage({ title: 'ログイン失敗', message: '認証に失敗しました。' }));
   const attempted = hashPassword(password, adminRow.password_salt).hash;
-  if (!safeCompare(attempted, adminRow.password_hash)) {
-    res.status(401).send(pageTemplate('ログイン失敗', '<section class="card"><p class="notice-error">認証に失敗しました。</p></section>'));
-    return;
-  }
-
-  const token = await createSession(adminRow.id);
-  setCookie(res, 'admin_session', token, 60 * 60 * 24 * 14);
-  redirect(res, '/admin');
+  if (!safeCompare(attempted, adminRow.password_hash)) return res.status(401).send(views.errorPage({ title: 'ログイン失敗', message: '認証に失敗しました。' }));
+  setCookie(res, 'admin_session', await createSession('sessions', 'admin_id', adminRow.id), 60 * 60 * 24 * 14);
+  clearCookie(res, 'viewer_session');
+  return redirect(res, '/admin');
 });
 
 app.post('/admin/logout', requireAdmin(async (_, res, admin) => {
   await run('DELETE FROM sessions WHERE admin_id = ?', [admin.id]);
   clearCookie(res, 'admin_session');
-  redirect(res, '/');
+  return redirect(res, '/');
 }));
 
-app.get('/admin', requireAdmin(async (req, res, admin) => {
-  const boxes = await all(`SELECT boxes.*, admins.username AS creator FROM boxes INNER JOIN admins ON admins.id = boxes.created_by_admin_id ORDER BY boxes.id DESC`);
-  const admins = await all('SELECT id, username, created_at FROM admins ORDER BY id');
+app.get('/viewer/login', async (req, res) => {
+  const viewer = await getViewerFromRequest(req);
+  if (viewer) return redirect(res, '/viewer');
+  return res.send(views.viewerLoginPage({ actor: await resolveActor(req) }));
+});
 
-  const boxRows = boxes.map((box) => `
-    <tr>
-      <td>${box.id}</td>
-      <td>${escapeHtml(box.title)}</td>
-      <td><a href="/box/${escapeHtml(box.slug)}">${escapeHtml(box.slug)}</a></td>
-      <td>${escapeHtml(box.allowed_extensions)}</td>
-      <td>${box.max_file_size_mb}MB / ${box.max_files_per_upload}件</td>
-      <td>${box.password_hash ? 'あり' : 'なし'}</td>
-      <td>${box.discord_webhook_url ? 'ON' : 'OFF'}</td>
-      <td>${box.is_active ? '公開' : '停止'}</td>
-      <td>${escapeHtml(box.creator)}</td>
-      <td>
-        <form class="inline-form" method="post" action="/admin/boxes/${box.id}/toggle"><button class="btn secondary" type="submit">${box.is_active ? '停止' : '再開'}</button></form>
-        <a class="btn secondary" href="/admin/boxes/${box.id}/files">ファイル</a>
-      </td>
-    </tr>
-  `).join('');
+app.post('/viewer/login', async (req, res) => {
+  const { username = '', password = '' } = req.body;
+  const viewerRow = await get('SELECT * FROM box_viewers WHERE username = ?', [username.trim()]);
+  if (!viewerRow) return res.status(401).send(views.errorPage({ title: 'ログイン失敗', message: '認証に失敗しました。' }));
+  const attempted = hashPassword(password, viewerRow.password_salt).hash;
+  if (!safeCompare(attempted, viewerRow.password_hash)) return res.status(401).send(views.errorPage({ title: 'ログイン失敗', message: '認証に失敗しました。' }));
+  setCookie(res, 'viewer_session', await createSession('viewer_sessions', 'viewer_id', viewerRow.id), 60 * 60 * 24 * 14);
+  clearCookie(res, 'admin_session');
+  return redirect(res, '/viewer');
+});
 
-  const adminRows = admins.map((a) => `<tr><td>${a.id}</td><td>${escapeHtml(a.username)}</td><td>${escapeHtml(a.created_at)}</td></tr>`).join('');
+app.post('/viewer/logout', async (req, res) => {
+  const viewer = await getViewerFromRequest(req);
+  if (viewer) await run('DELETE FROM viewer_sessions WHERE viewer_id = ?', [viewer.id]);
+  clearCookie(res, 'viewer_session');
+  return redirect(res, '/');
+});
 
-  res.send(pageTemplate('管理画面', `
-    <section class="grid two">
-      <div class="card">
-        <h2>募集ボックス作成</h2>
-        <form method="post" action="/admin/boxes/create">
-          <label>タイトル<input name="title" required maxlength="100" /></label>
-          <label>説明<textarea name="description" rows="3" maxlength="500"></textarea></label>
-          <label>許可拡張子（例: png,jpg,pdf）<input name="allowedExtensions" required /></label>
-          <label>最大ファイルサイズ(MB)<input type="number" name="maxFileSizeMb" min="1" max="500" value="20" required /></label>
-          <label>最大ファイル数/回<input type="number" name="maxFilesPerUpload" min="1" max="50" value="5" required /></label>
-          <label>ボックスパスワード（任意）<input type="password" name="boxPassword" maxlength="128" /></label>
-          <label>Discord Webhook URL（任意）<input name="discordWebhookUrl" maxlength="500" /></label>
-          <button class="btn" type="submit">作成</button>
-        </form>
-      </div>
-      <div class="card">
-        <h2>管理者追加</h2>
-        <p class="muted">初回作成後はログイン中管理者のみ作成できます。</p>
-        <form method="post" action="/admin/register">
-          <label>ユーザー名<input name="username" required minlength="3" maxlength="64" /></label>
-          <label>パスワード<input type="password" name="password" required minlength="8" maxlength="128" /></label>
-          <button class="btn" type="submit">追加</button>
-        </form>
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>募集ボックス一覧</h2>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>ID</th><th>タイトル</th><th>リンク</th><th>許可形式</th><th>制限</th><th>PW</th><th>Discord</th><th>状態</th><th>作成者</th><th>操作</th></tr></thead>
-          <tbody>${boxRows || '<tr><td colspan="10">まだありません</td></tr>'}</tbody>
-        </table>
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>管理者一覧</h2>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>ID</th><th>ユーザー名</th><th>作成日時</th></tr></thead>
-          <tbody>${adminRows}</tbody>
-        </table>
-      </div>
-    </section>
-  `, admin));
-}));
-
-app.post('/admin/boxes/create', requireAdmin(async (req, res, admin) => {
-  const { title = '', description = '', allowedExtensions = '', maxFileSizeMb = '', maxFilesPerUpload = '', boxPassword = '', discordWebhookUrl = '' } = req.body;
-  const cleanTitle = title.trim();
-  const parsedMaxMb = Number.parseInt(maxFileSizeMb, 10);
-  const parsedMaxFiles = Number.parseInt(maxFilesPerUpload, 10);
-
-  const extList = allowedExtensions.split(',').map((v) => v.trim().toLowerCase().replace(/^\./, '')).filter((v) => /^[a-z0-9]+$/.test(v));
-  if (!cleanTitle || extList.length === 0 || !Number.isInteger(parsedMaxMb) || !Number.isInteger(parsedMaxFiles)) {
-    res.status(400).send(pageTemplate('エラー', '<section class="card"><p class="notice-error">入力値が不正です。</p></section>', admin));
-    return;
-  }
-
-  const baseSlug = uniqueSlug(cleanTitle);
-  let slug = baseSlug;
-  let attempt = 1;
-  while (await get('SELECT id FROM boxes WHERE slug = ?', [slug])) {
-    slug = `${baseSlug}-${attempt}`;
-    attempt += 1;
-  }
-
-  let passwordHash = null;
-  let passwordSalt = null;
-  if (boxPassword.trim()) {
-    const result = hashPassword(boxPassword.trim());
-    passwordHash = result.hash;
-    passwordSalt = result.salt;
-  }
-
-  await run(
-    `INSERT INTO boxes (title, slug, description, allowed_extensions, max_file_size_mb, max_files_per_upload, password_hash, password_salt, discord_webhook_url, is_active, created_by_admin_id, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
-    [cleanTitle, slug, description.trim(), extList.join(','), parsedMaxMb, parsedMaxFiles, passwordHash, passwordSalt, discordWebhookUrl.trim(), admin.id, nowIso()],
+app.get('/viewer', async (req, res) => {
+  const viewer = await getViewerFromRequest(req);
+  if (!viewer) return redirect(res, '/viewer/login');
+  const boxes = await all(
+    `SELECT boxes.id, boxes.title, boxes.slug, boxes.description, boxes.is_active, boxes.expires_at
+     FROM viewer_box_permissions
+     INNER JOIN boxes ON boxes.id = viewer_box_permissions.box_id
+     WHERE viewer_box_permissions.viewer_id = ?
+     ORDER BY boxes.id DESC`,
+    [viewer.id],
   );
+  return res.send(views.viewerDashboardPage({ actor: viewer, boxes: boxes.map((b) => ({ ...b, is_expired: isBoxExpired(b) })) }));
+});
 
-  redirect(res, '/admin');
+app.get('/admin', requireAdmin(async (_, res, admin) => {
+  const boxes = await all('SELECT boxes.*, admins.username AS creator FROM boxes INNER JOIN admins ON admins.id = boxes.created_by_admin_id ORDER BY boxes.id DESC');
+  const admins = await all('SELECT id, username, created_at FROM admins ORDER BY id');
+  const viewers = await all(
+    `SELECT box_viewers.id, box_viewers.username, box_viewers.created_at,
+            GROUP_CONCAT(boxes.title, ' / ') AS allowed_boxes
+     FROM box_viewers
+     LEFT JOIN viewer_box_permissions ON viewer_box_permissions.viewer_id = box_viewers.id
+     LEFT JOIN boxes ON boxes.id = viewer_box_permissions.box_id
+     GROUP BY box_viewers.id
+     ORDER BY box_viewers.id DESC`,
+  );
+  return res.send(views.adminDashboardPage({ actor: admin, boxes, admins, viewers }));
 }));
 
-app.post('/admin/boxes/:id/toggle', requireAdmin(async (req, res) => {
-  const box = await get('SELECT id, is_active FROM boxes WHERE id = ?', [req.params.id]);
-  if (!box) {
-    res.status(404).send(pageTemplate('Not Found', '<section class="card"><p class="notice-error">募集ボックスが見つかりません。</p></section>'));
-    return;
+app.post('/admin/viewers/create', requireAdmin(async (req, res, admin) => {
+  const { username = '', password = '', boxId = '' } = req.body;
+  const cleanUser = username.trim();
+  const box = await get('SELECT id FROM boxes WHERE id = ?', [boxId]);
+  if (!cleanUser || password.length < 8 || !box) {
+    return res.status(400).send(views.errorPage({ actor: admin, message: '閲覧アカウント作成の入力値が不正です。' }));
   }
+  const { salt, hash } = hashPassword(password);
+  try {
+    const result = await run(
+      'INSERT INTO box_viewers (username, password_hash, password_salt, created_at, created_by_admin_id) VALUES (?, ?, ?, ?, ?)',
+      [cleanUser, hash, salt, nowIso(), admin.id],
+    );
+    await run('INSERT INTO viewer_box_permissions (viewer_id, box_id, created_at) VALUES (?, ?, ?)', [result.lastID, box.id, nowIso()]);
+    return redirect(res, '/admin');
+  } catch (_) {
+    return res.status(400).send(views.errorPage({ actor: admin, message: '同名の閲覧アカウントが存在するか、権限登録に失敗しました。' }));
+  }
+}));
+
+app.post('/admin/viewers/:id/assign', requireAdmin(async (req, res, admin) => {
+  const viewer = await get('SELECT id FROM box_viewers WHERE id = ?', [req.params.id]);
+  const box = await get('SELECT id FROM boxes WHERE id = ?', [req.body.boxId]);
+  if (!viewer || !box) return res.status(400).send(views.errorPage({ actor: admin, message: '閲覧権限の付与対象が不正です。' }));
+  await run('INSERT OR IGNORE INTO viewer_box_permissions (viewer_id, box_id, created_at) VALUES (?, ?, ?)', [viewer.id, box.id, nowIso()]);
+  return redirect(res, '/admin');
+}));
+
+function saveBoxHandler(mode) {
+  return requireAdmin(async (req, res, admin) => {
+    headerUpload.single('headerImage')(req, res, async (err) => {
+      if (err) return res.status(400).send(views.errorPage({ actor: admin, message: err.message }));
+
+      const input = normalizeBoxInput(req.body);
+      if (!input.title || input.extList.length === 0 || !Number.isInteger(input.maxFileSizeMb) || !Number.isInteger(input.maxFilesPerUpload)) {
+        if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        return res.status(400).send(views.errorPage({ actor: admin, message: '入力値が不正です。' }));
+      }
+
+      if (mode === 'create') {
+        const baseSlug = uniqueSlug(input.title);
+        let slug = baseSlug;
+        let attempt = 1;
+        while (await get('SELECT id FROM boxes WHERE slug = ?', [slug])) {
+          slug = `${baseSlug}-${attempt}`;
+          attempt += 1;
+        }
+
+        let passwordHash = null;
+        let passwordSalt = null;
+        if (input.boxPassword) ({ hash: passwordHash, salt: passwordSalt } = hashPassword(input.boxPassword));
+
+        await run(
+          `INSERT INTO boxes (title, slug, description, allowed_extensions, max_file_size_mb, max_files_per_upload, password_hash, password_salt, discord_webhook_url, is_active, created_by_admin_id, created_at, header_image_path, public_notice, success_message, require_uploader_name, max_total_files, expires_at, font_family, accent_color, custom_css, require_uploader_note, success_redirect_url)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            input.title,
+            slug,
+            input.description,
+            input.extList.join(','),
+            input.maxFileSizeMb,
+            input.maxFilesPerUpload,
+            passwordHash,
+            passwordSalt,
+            input.discordWebhookUrl,
+            admin.id,
+            nowIso(),
+            req.file ? path.basename(req.file.path) : null,
+            input.publicNotice,
+            input.successMessage,
+            input.requireUploaderName,
+            input.maxTotalFiles,
+            input.expiresAt ? new Date(input.expiresAt).toISOString() : null,
+            input.fontFamily,
+            input.accentColor,
+            input.customCss,
+            input.requireUploaderNote,
+            input.successRedirectUrl,
+          ],
+        );
+        return redirect(res, '/admin');
+      }
+
+      const box = await get('SELECT * FROM boxes WHERE id = ?', [req.params.id]);
+      if (!box) return res.status(404).send(views.errorPage({ actor: admin, message: '募集ボックスが見つかりません。' }));
+
+      let passwordHash = box.password_hash;
+      let passwordSalt = box.password_salt;
+      if (input.boxPassword) ({ hash: passwordHash, salt: passwordSalt } = hashPassword(input.boxPassword));
+
+      let headerImagePath = box.header_image_path;
+      if (req.body.removeHeaderImage && headerImagePath) {
+        const oldPath = path.join(HEADER_DIR, headerImagePath);
+        if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+        headerImagePath = null;
+      }
+      if (req.file) {
+        if (headerImagePath) {
+          const oldPath = path.join(HEADER_DIR, headerImagePath);
+          if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+        }
+        headerImagePath = path.basename(req.file.path);
+      }
+
+      await run(
+        `UPDATE boxes SET title = ?, description = ?, allowed_extensions = ?, max_file_size_mb = ?, max_files_per_upload = ?, password_hash = ?, password_salt = ?, discord_webhook_url = ?, header_image_path = ?, public_notice = ?, success_message = ?, require_uploader_name = ?, max_total_files = ?, expires_at = ?, font_family = ?, accent_color = ?, custom_css = ?, require_uploader_note = ?, success_redirect_url = ? WHERE id = ?`,
+        [
+          input.title,
+          input.description,
+          input.extList.join(','),
+          input.maxFileSizeMb,
+          input.maxFilesPerUpload,
+          passwordHash,
+          passwordSalt,
+          input.discordWebhookUrl,
+          headerImagePath,
+          input.publicNotice,
+          input.successMessage,
+          input.requireUploaderName,
+          input.maxTotalFiles,
+          input.expiresAt ? new Date(input.expiresAt).toISOString() : null,
+          input.fontFamily,
+          input.accentColor,
+          input.customCss,
+          input.requireUploaderNote,
+          input.successRedirectUrl,
+          box.id,
+        ],
+      );
+      return redirect(res, '/admin');
+    });
+  });
+}
+
+app.post('/admin/boxes/create', saveBoxHandler('create'));
+
+app.get('/admin/boxes/:id/edit', requireAdmin(async (req, res, admin) => {
+  const box = await get('SELECT * FROM boxes WHERE id = ?', [req.params.id]);
+  if (!box) return res.status(404).send(views.errorPage({ actor: admin, title: 'Not Found', message: '募集ボックスが見つかりません。' }));
+  return res.send(views.adminBoxEditPage({ actor: admin, box }));
+}));
+
+app.post('/admin/boxes/:id/edit', saveBoxHandler('edit'));
+
+app.post('/admin/boxes/:id/toggle', requireAdmin(async (req, res, admin) => {
+  const box = await get('SELECT id, is_active FROM boxes WHERE id = ?', [req.params.id]);
+  if (!box) return res.status(404).send(views.errorPage({ actor: admin, title: 'Not Found', message: '募集ボックスが見つかりません。' }));
   await run('UPDATE boxes SET is_active = ? WHERE id = ?', [box.is_active ? 0 : 1, box.id]);
-  redirect(res, '/admin');
+  return redirect(res, '/admin');
 }));
 
 app.get('/box/:slug', async (req, res) => {
+  const actor = await resolveActor(req);
   const box = await get('SELECT * FROM boxes WHERE slug = ?', [req.params.slug]);
-  if (!box || !box.is_active) {
-    res.status(404).send(pageTemplate('Not Found', '<section class="card"><p class="notice-error">募集ボックスが存在しないか停止中です。</p></section>'));
-    return;
-  }
-
-  const allowedExts = box.allowed_extensions.split(',').map((ext) => `.${ext}`).join(', ');
-
-  res.send(pageTemplate(`アップロード: ${box.title}`, `
-    <section class="card">
-      <h2>${escapeHtml(box.title)}</h2>
-      <p class="muted">${escapeHtml(box.description || '説明なし')}</p>
-      <p>許可形式: <span class="kbd">${escapeHtml(allowedExts)}</span> / 最大サイズ: <span class="kbd">${box.max_file_size_mb}MB</span> / 最大数: <span class="kbd">${box.max_files_per_upload}</span></p>
-      <form method="post" action="/box/${encodeURIComponent(box.slug)}/upload" enctype="multipart/form-data">
-        ${box.password_hash ? '<label>募集ボックスパスワード<input type="password" name="boxPassword" required /></label>' : ''}
-        <label>ファイル<input type="file" name="files" multiple required /></label>
-        <button class="btn" type="submit">アップロード</button>
-      </form>
-    </section>
-  `));
+  if (!box || !box.is_active || isBoxExpired(box)) return res.status(404).send(views.errorPage({ actor, title: 'Not Found', message: '募集ボックスが存在しないか停止/期限切れです。' }));
+  const currentCount = await get('SELECT COUNT(*) AS c FROM uploaded_files WHERE box_id = ?', [box.id]);
+  return res.send(views.boxPublicPage({ actor, box, currentCount: currentCount.c }));
 });
-
-const storage = multer.diskStorage({
-  destination: (_, __, cb) => cb(null, UPLOAD_DIR),
-  filename: (_, file, cb) => {
-    const unique = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;
-    cb(null, `${unique}${path.extname(file.originalname).toLowerCase()}`);
-  },
-});
-
-const upload = multer({ storage });
 
 app.post('/box/:slug/upload', upload.array('files', 50), async (req, res) => {
+  const actor = await resolveActor(req);
   const box = await get('SELECT * FROM boxes WHERE slug = ?', [req.params.slug]);
-  if (!box || !box.is_active) {
-    res.status(404).send(pageTemplate('Not Found', '<section class="card"><p class="notice-error">募集ボックスが存在しないか停止中です。</p></section>'));
-    return;
-  }
+  if (!box || !box.is_active || isBoxExpired(box)) return res.status(404).send(views.errorPage({ actor, title: 'Not Found', message: '募集ボックスが存在しないか停止/期限切れです。' }));
 
   const files = req.files || [];
-  if (files.length === 0) {
-    res.status(400).send(pageTemplate('アップロード失敗', '<section class="card"><p class="notice-error">ファイルがありません。</p></section>'));
-    return;
-  }
+  const uploaderName = (req.body.uploaderName || '').trim();
+  const uploaderNote = (req.body.uploaderNote || '').trim();
+  const cleanup = () => files.forEach((file) => { if (fs.existsSync(file.path)) fs.unlinkSync(file.path); });
 
-  const cleanup = () => {
-    files.forEach((file) => {
-      if (fs.existsSync(file.path)) {
-        fs.unlinkSync(file.path);
-      }
-    });
-  };
+  if (!files.length) return res.status(400).send(views.errorPage({ actor, title: 'アップロード失敗', message: 'ファイルがありません。' }));
+  if (box.require_uploader_name && !uploaderName) { cleanup(); return res.status(400).send(views.errorPage({ actor, title: 'アップロード失敗', message: '送信者名は必須です。' })); }
+  if (box.require_uploader_note && !uploaderNote) { cleanup(); return res.status(400).send(views.errorPage({ actor, title: 'アップロード失敗', message: 'メモは必須です。' })); }
+  if (files.length > box.max_files_per_upload) { cleanup(); return res.status(400).send(views.errorPage({ actor, title: 'アップロード失敗', message: `1回の上限(${box.max_files_per_upload})を超えています。` })); }
 
-  if (files.length > box.max_files_per_upload) {
+  const totalCount = await get('SELECT COUNT(*) AS c FROM uploaded_files WHERE box_id = ?', [box.id]);
+  if (box.max_total_files && totalCount.c + files.length > box.max_total_files) {
     cleanup();
-    res.status(400).send(pageTemplate('アップロード失敗', `<section class="card"><p class="notice-error">1回の上限(${box.max_files_per_upload})を超えています。</p></section>`));
-    return;
+    return res.status(400).send(views.errorPage({ actor, title: 'アップロード失敗', message: `募集ボックスの総数上限(${box.max_total_files})を超えます。` }));
   }
 
   if (box.password_hash) {
@@ -559,8 +625,7 @@ app.post('/box/:slug/upload', upload.array('files', 50), async (req, res) => {
     const attempted = hashPassword(provided, box.password_salt).hash;
     if (!provided || !safeCompare(attempted, box.password_hash)) {
       cleanup();
-      res.status(403).send(pageTemplate('アップロード失敗', '<section class="card"><p class="notice-error">募集ボックスパスワードが違います。</p></section>'));
-      return;
+      return res.status(403).send(views.errorPage({ actor, title: 'アップロード失敗', message: '募集ボックスパスワードが違います。' }));
     }
   }
 
@@ -569,93 +634,95 @@ app.post('/box/:slug/upload', upload.array('files', 50), async (req, res) => {
     const ext = path.extname(file.originalname).toLowerCase().replace(/^\./, '');
     if (!allowed.has(ext)) {
       cleanup();
-      res.status(400).send(pageTemplate('アップロード失敗', `<section class="card"><p class="notice-error">許可されていない拡張子: ${escapeHtml(file.originalname)}</p></section>`));
-      return;
+      return res.status(400).send(views.errorPage({ actor, title: 'アップロード失敗', message: `許可されていない拡張子: ${file.originalname}` }));
     }
     if (file.size > box.max_file_size_mb * 1024 * 1024) {
       cleanup();
-      res.status(400).send(pageTemplate('アップロード失敗', `<section class="card"><p class="notice-error">サイズ超過: ${escapeHtml(file.originalname)}</p></section>`));
-      return;
+      return res.status(400).send(views.errorPage({ actor, title: 'アップロード失敗', message: `サイズ超過: ${file.originalname}` }));
     }
   }
 
   for (const file of files) {
     await run(
-      `INSERT INTO uploaded_files (box_id, original_name, stored_name, mime_type, size_bytes, uploader_ip, uploaded_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [box.id, file.originalname, path.basename(file.path), file.mimetype, file.size, req.ip || '', nowIso()],
+      'INSERT INTO uploaded_files (box_id, uploader_name, uploader_note, original_name, stored_name, mime_type, size_bytes, uploader_ip, uploaded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [box.id, uploaderName || null, uploaderNote || null, file.originalname, path.basename(file.path), file.mimetype, file.size, getClientIp(req), nowIso()],
     );
   }
 
-  await postDiscordNotification(box.discord_webhook_url, box.title, files);
-
-  res.send(pageTemplate('アップロード完了', `
-    <section class="card">
-      <p class="notice-ok">${files.length}件アップロードしました。</p>
-      <a class="btn secondary" href="/box/${encodeURIComponent(box.slug)}">戻る</a>
-    </section>
-  `));
+  await postDiscordNotification(box.discord_webhook_url, box.title, files, uploaderName);
+  return res.send(views.uploadDonePage({ actor, box, count: files.length }));
 });
 
-app.get('/admin/boxes/:id/files', requireAdmin(async (req, res, admin) => {
+async function getAuthorizedFile(req, fileId) {
+  const actor = await resolveActor(req);
+  if (!actor) return { actor: null, file: null, allowed: false };
+  const file = await get('SELECT * FROM uploaded_files WHERE id = ?', [fileId]);
+  if (!file) return { actor, file: null, allowed: false };
+  if (actor.role === 'admin') return { actor, file, allowed: true };
+  const allowed = await canViewerAccessBox(actor.id, file.box_id);
+  return { actor, file, allowed };
+}
+
+app.get('/admin/boxes/:id/files', async (req, res) => {
+  const actor = await resolveActor(req);
+  if (!actor) return redirect(res, '/admin/login');
+
   const box = await get('SELECT * FROM boxes WHERE id = ?', [req.params.id]);
-  if (!box) {
-    res.status(404).send(pageTemplate('Not Found', '<section class="card"><p class="notice-error">募集ボックスが見つかりません。</p></section>', admin));
-    return;
+  if (!box) return res.status(404).send(views.errorPage({ actor, title: 'Not Found', message: '募集ボックスが見つかりません。' }));
+
+  if (actor.role === 'viewer' && !(await canViewerAccessBox(actor.id, box.id))) {
+    return res.status(403).send(views.errorPage({ actor, title: '権限エラー', message: 'この募集ボックスの閲覧権限がありません。' }));
   }
 
-  const files = await all('SELECT id, original_name, stored_name, size_bytes, uploader_ip, uploaded_at FROM uploaded_files WHERE box_id = ? ORDER BY id DESC', [box.id]);
-  const rows = files.map((file) => `
-    <tr>
-      <td>${file.id}</td>
-      <td>${escapeHtml(file.original_name)}</td>
-      <td>${Math.round(file.size_bytes / 1024)} KB</td>
-      <td>${escapeHtml(file.uploader_ip || '-')}</td>
-      <td>${escapeHtml(file.uploaded_at)}</td>
-      <td><a class="btn secondary" href="/admin/files/${file.id}/download">ダウンロード</a></td>
-    </tr>
-  `).join('');
+  const files = await all('SELECT id, uploader_name, uploader_note, original_name, stored_name, mime_type, size_bytes, uploader_ip, uploaded_at FROM uploaded_files WHERE box_id = ? ORDER BY id DESC', [box.id]);
+  return res.send(views.filesPage({ actor, box, files }));
+});
 
-  res.send(pageTemplate(`ファイル一覧: ${box.title}`, `
-    <section class="card">
-      <h2>${escapeHtml(box.title)} のアップロードファイル</h2>
-      <p><a class="btn secondary" href="/admin">管理画面へ戻る</a></p>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>ID</th><th>ファイル名</th><th>サイズ</th><th>IP</th><th>日時</th><th>操作</th></tr></thead>
-          <tbody>${rows || '<tr><td colspan="6">まだアップロードなし</td></tr>'}</tbody>
-        </table>
-      </div>
-    </section>
-  `, admin));
-}));
+app.get('/files/:id/download', async (req, res) => {
+  const { actor, file, allowed } = await getAuthorizedFile(req, req.params.id);
+  if (!actor) return redirect(res, '/admin/login');
+  if (!file) return res.status(404).send(views.errorPage({ actor, title: 'Not Found', message: 'ファイルが見つかりません。' }));
+  if (!allowed) return res.status(403).send(views.errorPage({ actor, title: '権限エラー', message: 'ダウンロード権限がありません。' }));
 
-app.get('/admin/files/:id/download', requireAdmin(async (req, res) => {
-  const file = await get('SELECT * FROM uploaded_files WHERE id = ?', [req.params.id]);
-  if (!file) {
-    res.status(404).send(pageTemplate('Not Found', '<section class="card"><p class="notice-error">ファイルが見つかりません。</p></section>'));
-    return;
+  const full = path.join(UPLOAD_DIR, path.basename(file.stored_name));
+  if (!fs.existsSync(full)) return res.status(404).send(views.errorPage({ actor, title: 'Not Found', message: '実体ファイルが存在しません。' }));
+  return res.download(full, file.original_name);
+});
+
+app.get('/files/:id/preview', async (req, res) => {
+  const { actor, file, allowed } = await getAuthorizedFile(req, req.params.id);
+  if (!actor) return redirect(res, '/admin/login');
+  if (!file) return res.status(404).send(views.errorPage({ actor, title: 'Not Found', message: 'ファイルが見つかりません。' }));
+  if (!allowed) return res.status(403).send(views.errorPage({ actor, title: '権限エラー', message: 'プレビュー権限がありません。' }));
+
+  const full = path.join(UPLOAD_DIR, path.basename(file.stored_name));
+  if (!fs.existsSync(full)) return res.status(404).send(views.errorPage({ actor, title: 'Not Found', message: '実体ファイルが存在しません。' }));
+
+  const previewType = detectPreviewType(file);
+  if (previewType === 'text') {
+    const content = fs.readFileSync(full, 'utf8').slice(0, 200000);
+    return res.send(views.previewPage({ actor, file, previewType, content }));
   }
-  const full = path.join(UPLOAD_DIR, file.stored_name);
-  if (!fs.existsSync(full)) {
-    res.status(404).send(pageTemplate('Not Found', '<section class="card"><p class="notice-error">実体ファイルが存在しません。</p></section>'));
-    return;
-  }
-  res.download(full, file.original_name);
-}));
+  return res.send(views.previewPage({ actor, file, previewType }));
+});
+
+app.get('/files/:id/raw', async (req, res) => {
+  const { actor, file, allowed } = await getAuthorizedFile(req, req.params.id);
+  if (!actor) return redirect(res, '/admin/login');
+  if (!file || !allowed) return res.status(403).send('Forbidden');
+  const full = path.join(UPLOAD_DIR, path.basename(file.stored_name));
+  if (!fs.existsSync(full)) return res.status(404).send('Not Found');
+  if (file.mime_type) res.type(file.mime_type);
+  return res.sendFile(full);
+});
 
 initDb().then(async () => {
   const adminCount = await get('SELECT COUNT(*) AS c FROM admins');
   app.listen(PORT, () => {
-    // eslint-disable-next-line no-console
-    console.log(`Uploader started on http://localhost:${PORT}`);
-    if (adminCount.c === 0) {
-      // eslint-disable-next-line no-console
-      console.log('最初に /admin/register から管理者を作成してください。');
-    }
+    console.log(`Uploader started on http://0.0.0.0:${PORT}`);
+    if (adminCount.c === 0) console.log('最初に /admin/register から管理者を作成してください。');
   });
 }).catch((err) => {
-  // eslint-disable-next-line no-console
   console.error(err);
   process.exit(1);
 });
