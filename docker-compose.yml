@@ -11,15 +11,3 @@ services:
     volumes:
       - ./data:/app/data
       - ./uploads:/app/uploads
-
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: uploader-cloudflared
-    restart: unless-stopped
-    depends_on:
-      - uploader
-    command: tunnel --no-autoupdate run
-    environment:
-      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
-    profiles:
-      - cloudflare
