@@ -136,3 +136,25 @@ th { background: var(--surface-alt); }
   overflow: auto;
   max-height: 70vh;
 }
+
+
+.ext-tools { margin-top: .45rem; }
+.ext-presets { display: flex; gap: .4rem; flex-wrap: wrap; margin-bottom: .45rem; }
+.tag-list { display: flex; gap: .4rem; flex-wrap: wrap; margin-top: .45rem; }
+.tag {
+  border: 1px solid var(--border);
+  background: var(--surface-alt);
+  color: var(--text);
+  border-radius: 2px;
+  padding: .2rem .45rem;
+  cursor: pointer;
+  font: inherit;
+}
+.file-list {
+  margin: .5rem 0 .8rem;
+  padding-left: 1.1rem;
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: 2px;
+}
+.file-list li { padding: .2rem 0; }

@@ -68,6 +68,11 @@ function viewerLoginPage({ actor }) {
   return layout({ title: '閲覧アカウントログイン', actor, body: `<section class="card"><h2>閲覧アカウントログイン</h2><p class="muted">募集ボックスの閲覧/ダウンロード専用アカウントです。</p><form method="post" action="/viewer/login"><label>ユーザー名<input name="username" required /></label><label>パスワード<input type="password" name="password" required /></label><button class="btn" type="submit">ログイン</button></form></section>` });
 }
 
+
+function extensionOptions() {
+  return ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg', 'pdf', 'txt', 'md', 'csv', 'json', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'zip', '7z', 'rar', 'mp3', 'wav', 'aac', 'flac', 'mp4', 'mov', 'mkv'];
+}
+
 function boxFormFields(box = {}) {
   const expiresValue = box.expires_at ? new Date(box.expires_at).toISOString().slice(0, 16) : '';
   return `
@@ -87,7 +92,25 @@ function boxFormFields(box = {}) {
     </label>
     <label>アクセントカラー<input type="color" name="accentColor" value="${escapeHtml(box.accent_color || '#2563eb')}" /></label>
     <label>追加CSS（任意）<textarea name="customCss" rows="4" maxlength="1500">${escapeHtml(box.custom_css || '')}</textarea></label>
-    <label>許可拡張子（例: png,jpg,pdf）<input name="allowedExtensions" required value="${escapeHtml(box.allowed_extensions || '')}" /></label>
+    <label>許可拡張子（タグ入力 + 手動入力対応）
+      <input id="allowedExtensionsInput" name="allowedExtensions" required value="${escapeHtml(box.allowed_extensions || '')}" />
+    </label>
+    <div class="ext-tools">
+      <div class="ext-presets">
+        <button class="btn secondary" type="button" data-ext-preset="png,jpg,jpeg,webp,gif,svg">画像ファイル</button>
+        <button class="btn secondary" type="button" data-ext-preset="pdf,doc,docx,xls,xlsx,ppt,pptx,txt,md,csv">文書ファイル</button>
+        <button class="btn secondary" type="button" data-ext-preset="mp3,wav,aac,flac,ogg">音声ファイル</button>
+        <button class="btn secondary" type="button" data-ext-preset="mp4,mov,mkv,webm">動画ファイル</button>
+        <button class="btn secondary" type="button" data-ext-preset="zip,7z,rar,tar,gz">圧縮ファイル</button>
+      </div>
+      <div class="assign-row">
+        <input id="extCandidate" list="extSuggestions" placeholder="例: pdf" />
+        <datalist id="extSuggestions">${extensionOptions().map((ext) => `<option value="${ext}">`).join('')}</datalist>
+        <button class="btn secondary" type="button" data-add-extension>追加</button>
+      </div>
+      <p class="muted">下の候補をクリックして追加できます。最終的にはカンマ区切りとして保存されます。</p>
+      <div id="selectedExtensions" class="tag-list" aria-live="polite"></div>
+    </div>
     <label>最大ファイルサイズ(MB / 0または空で無制限)<input type="number" name="maxFileSizeMb" min="0" max="4096" value="${box.max_file_size_mb || 0}" /></label>
     <label>最大ファイル数/回<input type="number" name="maxFilesPerUpload" min="1" max="1000" value="${box.max_files_per_upload || 20}" required /></label>
     <label>最大総アップロード件数（任意）<input type="number" name="maxTotalFiles" min="1" max="100000" value="${box.max_total_files || ''}" /></label>
@@ -162,7 +185,7 @@ function boxPublicPage({ actor, box, currentCount }) {
     title: `アップロード: ${box.title}`,
     actor,
     extraHead,
-    body: `<section class="card">${box.header_image_path ? `<img class="box-header" src="/box-assets/${encodeURIComponent(box.header_image_path)}" alt="header" />` : ''}<h2>${escapeHtml(box.title)}</h2><p class="muted">${escapeHtml(box.description || '説明なし')}</p>${box.public_notice ? `<p class="notice-info">${escapeHtml(box.public_notice)}</p>` : ''}<p>許可形式: <span class="kbd">${escapeHtml(box.allowed_extensions)}</span> / 最大サイズ: <span class="kbd">${box.max_file_size_mb ? `${box.max_file_size_mb}MB` : '無制限'}</span> / 最大数: <span class="kbd">${box.max_files_per_upload}</span> / 現在件数: <span class="kbd">${currentCount}${box.max_total_files ? ` / ${box.max_total_files}` : ''}</span></p><form method="post" action="/box/${encodeURIComponent(box.slug)}/upload" enctype="multipart/form-data">${box.password_hash ? '<label>募集ボックスパスワード<input type="password" name="boxPassword" required /></label>' : ''}${box.require_uploader_name ? '<label>送信者名<input name="uploaderName" maxlength="100" required /></label>' : '<label>送信者名（任意）<input name="uploaderName" maxlength="100" /></label>'}${box.require_uploader_note ? '<label>メモ<input name="uploaderNote" maxlength="200" required /></label>' : '<label>メモ（任意）<textarea name="uploaderNote" rows="2" maxlength="200"></textarea></label>'}<label>ファイル<input type="file" name="files" multiple required /></label><button class="btn" type="submit">アップロード</button></form></section>`,
+    body: `<section class="card">${box.header_image_path ? `<img class="box-header" src="/box-assets/${encodeURIComponent(box.header_image_path)}" alt="header" />` : ''}<h2>${escapeHtml(box.title)}</h2><p class="muted">${escapeHtml(box.description || '説明なし')}</p>${box.public_notice ? `<p class="notice-info">${escapeHtml(box.public_notice)}</p>` : ''}<p>許可形式: <span class="kbd">${escapeHtml(box.allowed_extensions)}</span> / 最大サイズ: <span class="kbd">${box.max_file_size_mb ? `${box.max_file_size_mb}MB` : '無制限'}</span> / 最大数: <span class="kbd">${box.max_files_per_upload}</span> / 現在件数: <span class="kbd">${currentCount}${box.max_total_files ? ` / ${box.max_total_files}` : ''}</span></p><form method="post" action="/box/${encodeURIComponent(box.slug)}/upload" enctype="multipart/form-data">${box.password_hash ? '<label>募集ボックスパスワード<input type="password" name="boxPassword" required /></label>' : ''}${box.require_uploader_name ? '<label>送信者名<input name="uploaderName" maxlength="100" required /></label>' : '<label>送信者名（任意）<input name="uploaderName" maxlength="100" /></label>'}${box.require_uploader_note ? '<label>メモ<input name="uploaderNote" maxlength="200" required /></label>' : '<label>メモ（任意）<textarea name="uploaderNote" rows="2" maxlength="200"></textarea></label>'}<label>ファイル<input id="uploadFilesInput" type="file" name="files" multiple required /></label><ul id="selectedUploadFiles" class="file-list" aria-live="polite"></ul><button class="btn" type="submit">アップロード</button></form></section>`,
   });
 }
 
