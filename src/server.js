@@ -4,6 +4,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const webpush = require('web-push');
 const views = require('./views');
 
 const app = express();
@@ -12,6 +13,12 @@ const DATA_DIR = path.join(__dirname, '..', 'data');
 const UPLOAD_DIR = path.join(DATA_DIR, '..', 'uploads');
 const HEADER_DIR = path.join(UPLOAD_DIR, 'headers');
 const DB_PATH = path.join(DATA_DIR, 'uploader.db');
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
+
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails('mailto:admin@example.com', VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+}
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -118,6 +125,40 @@ async function initDb() {
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     FOREIGN KEY(viewer_id) REFERENCES box_viewers(id)
+  )`);
+
+  await run(`CREATE TABLE IF NOT EXISTS notification_subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_type TEXT NOT NULL,
+    actor_id INTEGER NOT NULL,
+    endpoint TEXT NOT NULL,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(actor_type, actor_id, endpoint)
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS notification_box_settings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_type TEXT NOT NULL,
+    actor_id INTEGER NOT NULL,
+    box_id INTEGER NOT NULL,
+    is_enabled INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    UNIQUE(actor_type, actor_id, box_id)
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS upload_bans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_key TEXT UNIQUE NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    released_at TEXT
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS upload_violations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_key TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL
   )`);
 
   await ensureColumn('boxes', 'header_image_path', 'TEXT');
@@ -300,6 +341,49 @@ async function resolveActor(req) {
   return getViewerFromRequest(req);
 }
 
+
+function getOrCreateVisitorKey(req, res) {
+  const cookies = parseCookies(req);
+  if (cookies.visitor_key) return cookies.visitor_key;
+  const key = crypto.randomBytes(16).toString('hex');
+  setCookie(res, 'visitor_key', key, 60 * 60 * 24 * 365);
+  return key;
+}
+
+async function isBanned(subjectKey) {
+  const row = await get('SELECT * FROM upload_bans WHERE subject_key = ? AND released_at IS NULL', [subjectKey]);
+  return row || null;
+}
+
+async function recordViolation(subjectKey, reason) {
+  await run('INSERT INTO upload_violations (subject_key, reason, created_at) VALUES (?, ?, ?)', [subjectKey, reason, nowIso()]);
+  const recent = await get("SELECT COUNT(*) AS c FROM upload_violations WHERE subject_key = ? AND julianday(created_at) >= julianday('now', '-30 minutes')", [subjectKey]);
+  if (recent && recent.c >= 5 && !(await isBanned(subjectKey))) {
+    await run('INSERT INTO upload_bans (subject_key, reason, created_at, created_by) VALUES (?, ?, ?, ?)', [subjectKey, '自動BAN: 短時間に失敗が繰り返されたため', nowIso(), 'auto']);
+  }
+}
+
+async function sendUploadPush(box, filesCount) {
+  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
+  const targets = await all(
+    `SELECT ns.id, ns.endpoint, ns.p256dh, ns.auth
+     FROM notification_subscriptions ns
+     INNER JOIN notification_box_settings nbs ON nbs.actor_type = ns.actor_type AND nbs.actor_id = ns.actor_id
+     WHERE nbs.box_id = ? AND nbs.is_enabled = 1`,
+    [box.id],
+  );
+  await Promise.all(targets.map(async (row) => {
+    try {
+      await webpush.sendNotification(
+        { endpoint: row.endpoint, keys: { p256dh: row.p256dh, auth: row.auth } },
+        JSON.stringify({ title: 'Uploader通知', body: `「${box.title}」に${filesCount}件アップロードされました`, url: `/admin/boxes/${box.id}/files` }),
+      );
+    } catch (_) {
+      await run('DELETE FROM notification_subscriptions WHERE id = ?', [row.id]);
+    }
+  }));
+}
+
 async function postDiscordNotification(webhookUrl, boxTitle, files, uploaderName = '') {
   if (!webhookUrl) return;
   const content = `📦 募集ボックス「${boxTitle}」に ${files.length} 件のファイルがアップロードされました\n送信者: ${uploaderName || '未入力'}\n${files.map((f) => `- ${f.originalname} (${Math.round(f.size / 1024)} KB)`).join('\n')}`;
@@ -312,6 +396,7 @@ async function postDiscordNotification(webhookUrl, boxTitle, files, uploaderName
 
 app.set('trust proxy', true);
 app.use(express.urlencoded({ extended: false }));
+app.use(express.json());
 app.use('/assets', express.static(path.join(__dirname, '..', 'public')));
 app.use('/box-assets', express.static(HEADER_DIR));
 
@@ -428,7 +513,10 @@ app.get('/viewer', async (req, res) => {
      ORDER BY boxes.id DESC`,
     [viewer.id],
   );
-  return res.send(views.viewerDashboardPage({ actor: viewer, boxes: boxes.map((b) => ({ ...b, is_expired: isBoxExpired(b) })) }));
+  const rows = boxes.map((b) => ({ ...b, is_expired: isBoxExpired(b) }));
+  const pushSettings = await all('SELECT box_id, is_enabled FROM notification_box_settings WHERE actor_type = ? AND actor_id = ?', ['viewer', viewer.id]);
+  const pushMap = Object.fromEntries(pushSettings.map((r) => [String(r.box_id), r.is_enabled]));
+  return res.send(views.viewerDashboardPage({ actor: viewer, boxes: rows, pushMap, vapidEnabled: Boolean(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) }));
 });
 
 app.get('/admin', requireAdmin(async (_, res, admin) => {
@@ -443,7 +531,10 @@ app.get('/admin', requireAdmin(async (_, res, admin) => {
      GROUP BY box_viewers.id
      ORDER BY box_viewers.id DESC`,
   );
-  return res.send(views.adminDashboardPage({ actor: admin, boxes, admins, viewers }));
+  const pushSettings = await all('SELECT box_id, is_enabled FROM notification_box_settings WHERE actor_type = ? AND actor_id = ?', ['admin', admin.id]);
+  const pushMap = Object.fromEntries(pushSettings.map((r) => [String(r.box_id), r.is_enabled]));
+  const banRows = await all('SELECT id, subject_key, reason, created_at, created_by FROM upload_bans WHERE released_at IS NULL ORDER BY id DESC');
+  return res.send(views.adminDashboardPage({ actor: admin, boxes, admins, viewers, pushMap, vapidEnabled: Boolean(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY), bans: banRows }));
 }));
 
 app.post('/admin/viewers/create', requireAdmin(async (req, res, admin) => {
@@ -471,6 +562,48 @@ app.post('/admin/viewers/:id/assign', requireAdmin(async (req, res, admin) => {
   const box = await get('SELECT id FROM boxes WHERE id = ?', [req.body.boxId]);
   if (!viewer || !box) return res.status(400).send(views.errorPage({ actor: admin, message: '閲覧権限の付与対象が不正です。' }));
   await run('INSERT OR IGNORE INTO viewer_box_permissions (viewer_id, box_id, created_at) VALUES (?, ?, ?)', [viewer.id, box.id, nowIso()]);
+  return redirect(res, '/admin');
+}));
+
+
+app.get('/push/vapid-public-key', async (req, res) => {
+  const actor = await resolveActor(req);
+  if (!actor) return res.status(401).json({ error: 'auth required' });
+  if (!VAPID_PUBLIC_KEY) return res.status(503).json({ error: 'push unavailable' });
+  return res.json({ key: VAPID_PUBLIC_KEY });
+});
+
+app.post('/push/subscribe', async (req, res) => {
+  const actor = await resolveActor(req);
+  if (!actor) return res.status(401).json({ ok: false });
+  const sub = req.body && req.body.subscription;
+  if (!sub || !sub.endpoint || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) return res.status(400).json({ ok: false });
+  await run(
+    'INSERT OR REPLACE INTO notification_subscriptions (id, actor_type, actor_id, endpoint, p256dh, auth, created_at) VALUES ((SELECT id FROM notification_subscriptions WHERE actor_type = ? AND actor_id = ? AND endpoint = ?), ?, ?, ?, ?, ?, ?)',
+    [actor.role, actor.id, sub.endpoint, actor.role, actor.id, sub.endpoint, sub.keys.p256dh, sub.keys.auth, nowIso()],
+  );
+  return res.json({ ok: true });
+});
+
+app.post('/push/boxes/:boxId/toggle', async (req, res) => {
+  const actor = await resolveActor(req);
+  if (!actor) return redirect(res, '/admin/login');
+  const box = await get('SELECT id FROM boxes WHERE id = ?', [req.params.boxId]);
+  if (!box) return res.status(404).send(views.errorPage({ actor, message: '募集ボックスが見つかりません。' }));
+  if (actor.role === 'viewer' && !(await canViewerAccessBox(actor.id, box.id))) return res.status(403).send(views.errorPage({ actor, message: '権限がありません。' }));
+  const current = await get('SELECT id, is_enabled FROM notification_box_settings WHERE actor_type = ? AND actor_id = ? AND box_id = ?', [actor.role, actor.id, box.id]);
+  if (!current) {
+    await run('INSERT INTO notification_box_settings (actor_type, actor_id, box_id, is_enabled, updated_at) VALUES (?, ?, ?, 1, ?)', [actor.role, actor.id, box.id, nowIso()]);
+  } else {
+    await run('UPDATE notification_box_settings SET is_enabled = ?, updated_at = ? WHERE id = ?', [current.is_enabled ? 0 : 1, nowIso(), current.id]);
+  }
+  return redirect(res, actor.role === 'admin' ? '/admin' : '/viewer');
+});
+
+app.post('/admin/bans/:id/release', requireAdmin(async (req, res, admin) => {
+  const ban = await get('SELECT id FROM upload_bans WHERE id = ? AND released_at IS NULL', [req.params.id]);
+  if (!ban) return res.status(404).send(views.errorPage({ actor: admin, message: 'BAN対象が見つかりません。' }));
+  await run('UPDATE upload_bans SET released_at = ? WHERE id = ?', [nowIso(), ban.id]);
   return redirect(res, '/admin');
 }));
 
@@ -599,6 +732,9 @@ app.post('/admin/boxes/:id/toggle', requireAdmin(async (req, res, admin) => {
 
 app.get('/box/:slug', async (req, res) => {
   const actor = await resolveActor(req);
+  const visitorKey = getOrCreateVisitorKey(req, res);
+  const ban = await isBanned(visitorKey);
+  if (ban) return res.status(403).send(views.errorPage({ actor, title: 'アップロード不可', message: `この端末からのアップロードは停止されています。理由: ${ban.reason}` }));
   const box = await get('SELECT * FROM boxes WHERE slug = ?', [req.params.slug]);
   if (!box || !box.is_active || isBoxExpired(box)) return res.status(404).send(views.errorPage({ actor, title: 'Not Found', message: '募集ボックスが存在しないか停止/期限切れです。' }));
   const currentCount = await get('SELECT COUNT(*) AS c FROM uploaded_files WHERE box_id = ?', [box.id]);
@@ -615,6 +751,9 @@ app.post('/box/:slug/upload', (req, res, next) => {
   });
 }, async (req, res) => {
   const actor = await resolveActor(req);
+  const visitorKey = getOrCreateVisitorKey(req, res);
+  const ban = await isBanned(visitorKey);
+  if (ban) return res.status(403).send(views.errorPage({ actor, title: 'アップロード不可', message: `この端末からのアップロードは停止されています。理由: ${ban.reason}` }));
   const box = await get('SELECT * FROM boxes WHERE slug = ?', [req.params.slug]);
   if (!box || !box.is_active || isBoxExpired(box)) return res.status(404).send(views.errorPage({ actor, title: 'Not Found', message: '募集ボックスが存在しないか停止/期限切れです。' }));
 
@@ -623,10 +762,10 @@ app.post('/box/:slug/upload', (req, res, next) => {
   const uploaderNote = (req.body.uploaderNote || '').trim();
   const cleanup = () => files.forEach((file) => { if (fs.existsSync(file.path)) fs.unlinkSync(file.path); });
 
-  if (!files.length) return res.status(400).send(views.errorPage({ actor, title: 'アップロード失敗', message: 'ファイルがありません。' }));
+  if (!files.length) { await recordViolation(visitorKey, 'ファイル未選択'); return res.status(400).send(views.errorPage({ actor, title: 'アップロード失敗', message: 'ファイルがありません。' })); }
   if (box.require_uploader_name && !uploaderName) { cleanup(); return res.status(400).send(views.errorPage({ actor, title: 'アップロード失敗', message: '送信者名は必須です。' })); }
   if (box.require_uploader_note && !uploaderNote) { cleanup(); return res.status(400).send(views.errorPage({ actor, title: 'アップロード失敗', message: 'メモは必須です。' })); }
-  if (files.length > box.max_files_per_upload) { cleanup(); return res.status(400).send(views.errorPage({ actor, title: 'アップロード失敗', message: `1回の上限(${box.max_files_per_upload})を超えています。` })); }
+  if (files.length > box.max_files_per_upload) { cleanup(); await recordViolation(visitorKey, '回数上限超過'); return res.status(400).send(views.errorPage({ actor, title: 'アップロード失敗', message: `1回の上限(${box.max_files_per_upload})を超えています。` })); }
 
   const totalCount = await get('SELECT COUNT(*) AS c FROM uploaded_files WHERE box_id = ?', [box.id]);
   if (box.max_total_files && totalCount.c + files.length > box.max_total_files) {
@@ -639,6 +778,7 @@ app.post('/box/:slug/upload', (req, res, next) => {
     const attempted = hashPassword(provided, box.password_salt).hash;
     if (!provided || !safeCompare(attempted, box.password_hash)) {
       cleanup();
+      await recordViolation(visitorKey, 'ボックスパスワード不一致');
       return res.status(403).send(views.errorPage({ actor, title: 'アップロード失敗', message: '募集ボックスパスワードが違います。' }));
     }
   }
@@ -648,6 +788,7 @@ app.post('/box/:slug/upload', (req, res, next) => {
     const ext = path.extname(file.originalname).toLowerCase().replace(/^\./, '');
     if (!allowed.has(ext)) {
       cleanup();
+      await recordViolation(visitorKey, `許可外拡張子: ${file.originalname}`);
       return res.status(400).send(views.errorPage({ actor, title: 'アップロード失敗', message: `許可されていない拡張子: ${file.originalname}` }));
     }
     if (box.max_file_size_mb && file.size > box.max_file_size_mb * 1024 * 1024) {
@@ -664,6 +805,7 @@ app.post('/box/:slug/upload', (req, res, next) => {
       );
     }
     await postDiscordNotification(box.discord_webhook_url, box.title, files, uploaderName);
+    await sendUploadPush(box, files.length);
     return res.send(views.uploadDonePage({ actor, box, count: files.length }));
   } catch (err) {
     cleanup();

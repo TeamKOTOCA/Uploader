@@ -61,3 +61,14 @@ docker compose up -d --build
 ## 9. 大容量ファイル対応
 - ボックスの `max_file_size_mb` は `NULL/0` を無制限として扱います。
 - 2GB前後のファイルを扱う場合は、リバースプロキシやトンネル側のアップロード制限値も調整してください。
+
+
+## 10. Push通知
+- `notification_subscriptions`: ブラウザ購読情報
+- `notification_box_settings`: アカウント×ボックスの通知ON/OFF
+- `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` が設定されるとWeb Push送信が有効になります。
+
+## 11. 自動BAN
+- `upload_violations` に失敗イベントを記録し、短時間の失敗連続で `upload_bans` に自動登録します。
+- BAN対象はIPではなく `visitor_key` Cookie による端末識別キーです。
+- 管理画面の BAN管理タブから理由確認と解除が可能です。

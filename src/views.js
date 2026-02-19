@@ -123,18 +123,15 @@ function boxFormFields(box = {}) {
   `;
 }
 
-function adminDashboardPage({ actor, boxes, admins, viewers }) {
+function adminDashboardPage({ actor, boxes, admins, viewers, pushMap = {}, vapidEnabled = false, bans = [] }) {
   const boxRows = boxes.map((box) => `
     <tr>
       <td>${box.id}</td><td>${escapeHtml(box.title)}</td><td><a href="/box/${escapeHtml(box.slug)}">${escapeHtml(box.slug)}</a></td>
       <td>${escapeHtml(box.allowed_extensions)}</td>
       <td>${box.max_file_size_mb ? `${box.max_file_size_mb}MB` : '無制限'} / ${box.max_files_per_upload}件 / 総数${box.max_total_files || '無制限'}</td>
-      <td>${box.require_uploader_name ? '必須' : '任意'}</td>
-      <td>${box.require_uploader_note ? '必須' : '任意'}</td>
-      <td>${box.font_family || 'system'} / ${escapeHtml(box.accent_color || '#2563eb')}</td>
-      <td>${box.expires_at ? escapeHtml(box.expires_at) : 'なし'}</td>
       <td>${box.is_active ? '公開' : '停止'}</td>
       <td>
+        <form class="inline-form" method="post" action="/push/boxes/${box.id}/toggle"><button class="btn secondary" type="submit">${pushMap[String(box.id)] ? 'Push ON' : 'Push OFF'}</button></form>
         <button class="btn secondary js-copy" type="button" data-copy="/box/${escapeHtml(box.slug)}">リンクコピー</button>
         <form class="inline-form" method="post" action="/admin/boxes/${box.id}/toggle"><button class="btn secondary" type="submit">${box.is_active ? '停止' : '再開'}</button></form>
         <a class="btn secondary" href="/admin/boxes/${box.id}/files">ファイル</a>
@@ -145,18 +142,25 @@ function adminDashboardPage({ actor, boxes, admins, viewers }) {
 
   const adminRows = admins.map((a) => `<tr><td>${a.id}</td><td>${escapeHtml(a.username)}</td><td>${escapeHtml(a.created_at)}</td></tr>`).join('');
   const viewerRows = viewers.map((v) => `<tr><td>${v.id}</td><td>${escapeHtml(v.username)}</td><td>${escapeHtml(v.allowed_boxes || '(未割当)')}</td><td>${escapeHtml(v.created_at)}</td><td><form method="post" action="/admin/viewers/${v.id}/assign"><div class="assign-row"><input type="number" name="boxId" min="1" required placeholder="box id"/><button class="btn secondary" type="submit">割当</button></div></form></td></tr>`).join('');
+  const banRows = bans.map((b) => `<tr><td>${b.id}</td><td>${escapeHtml(b.subject_key)}</td><td>${escapeHtml(b.reason)}</td><td>${escapeHtml(b.created_by)}</td><td>${escapeHtml(b.created_at)}</td><td><form method="post" action="/admin/bans/${b.id}/release"><button class="btn secondary" type="submit">解除</button></form></td></tr>`).join('');
 
   return layout({
     title: '管理画面',
     actor,
     body: `
-      <section class="grid two">
-        <div class="card"><h2>募集ボックス作成</h2><form method="post" action="/admin/boxes/create" enctype="multipart/form-data">${boxFormFields()}<button class="btn" type="submit">作成</button></form></div>
-        <div class="card"><h2>アカウント作成</h2><h3>管理者追加</h3><form method="post" action="/admin/register"><label>ユーザー名<input name="username" required minlength="3" maxlength="64" /></label><label>パスワード<input type="password" name="password" required minlength="8" maxlength="128" /></label><button class="btn" type="submit">管理者追加</button></form><hr/><h3>閲覧アカウント追加</h3><form method="post" action="/admin/viewers/create"><label>ユーザー名<input name="username" required minlength="3" maxlength="64" /></label><label>パスワード<input type="password" name="password" required minlength="8" maxlength="128" /></label><label>初期割当ボックスID<input type="number" name="boxId" min="1" required /></label><button class="btn" type="submit">閲覧アカウント追加</button></form></div>
+      <section class="card"><h2>通知設定</h2>${vapidEnabled ? '<button type="button" class="btn" id="enablePushBtn">このブラウザでPush通知を有効化</button><p class="muted">有効化後、各ボックスの Push ON/OFF を切り替えできます。</p>' : '<p class="notice-info">Push通知は未設定です。環境変数 VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY を設定してください。</p>'}</section>
+      <section class="tabs" data-tabs>
+        <div class="tab-buttons">
+          <button class="btn secondary" type="button" data-tab-target="tab-boxes">募集ボックス</button>
+          <button class="btn secondary" type="button" data-tab-target="tab-create">作成</button>
+          <button class="btn secondary" type="button" data-tab-target="tab-accounts">アカウント</button>
+          <button class="btn secondary" type="button" data-tab-target="tab-ban">BAN管理</button>
+        </div>
+        <div class="tab-panel" data-tab-panel="tab-boxes"><section class="card"><h2>募集ボックス一覧</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>タイトル</th><th>リンク</th><th>許可形式</th><th>制限</th><th>状態</th><th>操作</th></tr></thead><tbody>${boxRows || '<tr><td colspan="7">まだありません</td></tr>'}</tbody></table></div></section></div>
+        <div class="tab-panel" data-tab-panel="tab-create"><section class="grid two"><div class="card"><h2>募集ボックス作成</h2><form method="post" action="/admin/boxes/create" enctype="multipart/form-data">${boxFormFields()}<button class="btn" type="submit">作成</button></form></div></section></div>
+        <div class="tab-panel" data-tab-panel="tab-accounts"><section class="grid two"><div class="card"><h2>アカウント作成</h2><h3>管理者追加</h3><form method="post" action="/admin/register"><label>ユーザー名<input name="username" required minlength="3" maxlength="64" /></label><label>パスワード<input type="password" name="password" required minlength="8" maxlength="128" /></label><button class="btn" type="submit">管理者追加</button></form><hr/><h3>閲覧アカウント追加</h3><form method="post" action="/admin/viewers/create"><label>ユーザー名<input name="username" required minlength="3" maxlength="64" /></label><label>パスワード<input type="password" name="password" required minlength="8" maxlength="128" /></label><label>初期割当ボックスID<input type="number" name="boxId" min="1" required /></label><button class="btn" type="submit">閲覧アカウント追加</button></form></div><div class="card"><h2>閲覧アカウント一覧</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>ユーザー名</th><th>閲覧可能ボックス</th><th>作成日時</th><th>追加割当</th></tr></thead><tbody>${viewerRows || '<tr><td colspan="5">まだありません</td></tr>'}</tbody></table></div></div></section><section class="card"><h2>管理者一覧</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>ユーザー名</th><th>作成日時</th></tr></thead><tbody>${adminRows}</tbody></table></div></section></div>
+        <div class="tab-panel" data-tab-panel="tab-ban"><section class="card"><h2>BAN管理</h2><p class="muted">IP単体BANは行わず、端末識別キー単位で自動BANされます。</p><div class="table-wrap"><table><thead><tr><th>ID</th><th>識別キー</th><th>理由</th><th>実行者</th><th>日時</th><th>操作</th></tr></thead><tbody>${banRows || '<tr><td colspan="6">現在BANはありません</td></tr>'}</tbody></table></div></section></div>
       </section>
-      <section class="card"><h2>募集ボックス一覧</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>タイトル</th><th>リンク</th><th>許可形式</th><th>制限</th><th>送信者名</th><th>メモ</th><th>テーマ</th><th>期限</th><th>状態</th><th>操作</th></tr></thead><tbody>${boxRows || '<tr><td colspan="11">まだありません</td></tr>'}</tbody></table></div></section>
-      <section class="card"><h2>閲覧アカウント一覧</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>ユーザー名</th><th>閲覧可能ボックス</th><th>作成日時</th><th>追加割当</th></tr></thead><tbody>${viewerRows || '<tr><td colspan="5">まだありません</td></tr>'}</tbody></table></div></section>
-      <section class="card"><h2>管理者一覧</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>ユーザー名</th><th>作成日時</th></tr></thead><tbody>${adminRows}</tbody></table></div></section>
     `,
   });
 }
@@ -165,9 +169,9 @@ function adminBoxEditPage({ actor, box }) {
   return layout({ title: `ボックス編集: ${box.title}`, actor, body: `<section class="card"><h2>募集ボックス編集</h2>${box.header_image_path ? `<img class="box-header" src="/box-assets/${encodeURIComponent(box.header_image_path)}" alt="header" />` : ''}<form method="post" action="/admin/boxes/${box.id}/edit" enctype="multipart/form-data">${boxFormFields(box)}<button class="btn" type="submit">更新</button></form></section>` });
 }
 
-function viewerDashboardPage({ actor, boxes }) {
-  const rows = boxes.map((box) => `<tr><td>${box.id}</td><td>${escapeHtml(box.title)}</td><td>${box.is_active && !box.is_expired ? '閲覧可能' : '停止/期限切れ'}</td><td><a class="btn secondary" href="/admin/boxes/${box.id}/files">ファイル一覧</a></td></tr>`).join('');
-  return layout({ title: '閲覧ダッシュボード', actor, body: `<section class="card"><h2>閲覧可能な募集ボックス</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>タイトル</th><th>状態</th><th>操作</th></tr></thead><tbody>${rows || '<tr><td colspan="4">割り当てがありません</td></tr>'}</tbody></table></div></section>` });
+function viewerDashboardPage({ actor, boxes, pushMap = {}, vapidEnabled = false }) {
+  const rows = boxes.map((box) => `<tr><td>${box.id}</td><td>${escapeHtml(box.title)}</td><td>${box.is_active && !box.is_expired ? '閲覧可能' : '停止/期限切れ'}</td><td><form class="inline-form" method="post" action="/push/boxes/${box.id}/toggle"><button class="btn secondary" type="submit">${pushMap[String(box.id)] ? 'Push ON' : 'Push OFF'}</button></form></td><td><a class="btn secondary" href="/admin/boxes/${box.id}/files">ファイル一覧</a></td></tr>`).join('');
+  return layout({ title: '閲覧ダッシュボード', actor, body: `<section class="card"><h2>通知設定</h2>${vapidEnabled ? '<button type="button" class="btn" id="enablePushBtn">このブラウザでPush通知を有効化</button>' : '<p class="notice-info">Push通知は未設定です。管理者へ問い合わせてください。</p>'}</section><section class="card"><h2>閲覧可能な募集ボックス</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>タイトル</th><th>状態</th><th>通知</th><th>操作</th></tr></thead><tbody>${rows || '<tr><td colspan="5">割り当てがありません</td></tr>'}</tbody></table></div></section>` });
 }
 
 function boxPublicPage({ actor, box, currentCount }) {

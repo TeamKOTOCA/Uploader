@@ -20,6 +20,8 @@
 - アップロード画面での選択ファイル一覧表示
 - ファイルプレビュー（画像/動画/音声/PDF/テキスト）
 - Discord Webhook 通知
+- Push通知（管理者/閲覧者が各ボックス単位で ON/OFF）
+- 自動BAN（端末識別キー単位、管理画面で理由確認/解除）
 - Docker / LXC / Cloudflare Tunnel 運用対応
 - `/healthz` ヘルスチェック
 
@@ -54,3 +56,8 @@ docker compose --profile cloudflare up -d --build
 ## 大容量アップロード運用メモ
 - アプリ側はボックスの「最大ファイルサイズ」を 0 または空欄にすると無制限扱いです。
 - 2GB級のアップロード時は、Cloudflare/Nginx/Traefik など前段プロキシのボディサイズ制限も合わせて緩和してください。
+
+
+## Push通知の有効化
+- 環境変数 `VAPID_PUBLIC_KEY` と `VAPID_PRIVATE_KEY` を設定してください。
+- ログイン後の管理画面/閲覧画面で「このブラウザでPush通知を有効化」を押し、各ボックスで Push ON にすると通知対象になります。

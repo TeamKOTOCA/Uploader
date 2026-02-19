@@ -158,3 +158,9 @@ th { background: var(--surface-alt); }
   border-radius: 2px;
 }
 .file-list li { padding: .2rem 0; }
+
+
+.tabs { margin-top: .8rem; }
+.tab-buttons { display: flex; flex-wrap: wrap; gap: .45rem; margin-bottom: .6rem; }
+.tab-buttons .btn.active { background: #111; color: #fff; }
+.tab-panel { display: none; }
