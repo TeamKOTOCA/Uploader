@@ -182,6 +182,18 @@ function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
   return { salt, hash: crypto.pbkdf2Sync(password, salt, 120000, 64, 'sha512').toString('hex') };
 }
 
+function normalizeUsername(raw) {
+  return (raw || '').trim();
+}
+
+function isValidUsername(username) {
+  return /^[a-zA-Z0-9_.-]{3,64}$/.test(username);
+}
+
+function isValidPassword(password) {
+  return typeof password === 'string' && password.length >= 8 && password.length <= 128;
+}
+
 function safeCompare(a, b) {
   const aBuffer = Buffer.from(a, 'hex');
   const bBuffer = Buffer.from(b, 'hex');
@@ -431,19 +443,19 @@ app.get('/', async (req, res) => {
 app.get('/admin/register', async (req, res) => {
   const actor = await resolveActor(req);
   const count = await get('SELECT COUNT(*) AS c FROM admins');
-  if (count.c > 0 && (!actor || actor.role !== 'admin')) {
-    return res.status(403).send(views.errorPage({ title: '管理者登録不可', message: '初回作成後はログイン済み管理者のみ追加できます。', actor }));
+  if (count.c > 0) {
+    return res.status(403).send(views.errorPage({ title: '管理者登録不可', message: '管理者アカウントは初回作成の1件のみです。', actor }));
   }
   return res.send(views.adminRegisterPage({ actor }));
 });
 
 app.post('/admin/register', async (req, res) => {
   const { username = '', password = '' } = req.body;
-  const cleanUser = username.trim();
-  if (!cleanUser || password.length < 8) return res.status(400).send(views.errorPage({ message: '入力が不正です。' }));
+  const cleanUser = normalizeUsername(username);
+  if (!isValidUsername(cleanUser) || !isValidPassword(password)) return res.status(400).send(views.errorPage({ message: 'ユーザー名またはパスワードの形式が不正です。' }));
   const count = await get('SELECT COUNT(*) AS c FROM admins');
   const actor = await resolveActor(req);
-  if (count.c > 0 && (!actor || actor.role !== 'admin')) return res.status(403).send(views.errorPage({ message: '権限がありません。', actor }));
+  if (count.c > 0) return res.status(403).send(views.errorPage({ message: '管理者アカウントは追加できません。', actor }));
   const { salt, hash } = hashPassword(password);
   try {
     const result = await run('INSERT INTO admins (username, password_hash, password_salt, created_at) VALUES (?, ?, ?, ?)', [cleanUser, hash, salt, nowIso()]);
@@ -463,7 +475,9 @@ app.get('/admin/login', async (req, res) => {
 
 app.post('/admin/login', async (req, res) => {
   const { username = '', password = '' } = req.body;
-  const adminRow = await get('SELECT * FROM admins WHERE username = ?', [username.trim()]);
+  const cleanUser = normalizeUsername(username);
+  if (!cleanUser || !isValidPassword(password)) return res.status(401).send(views.errorPage({ title: 'ログイン失敗', message: '認証に失敗しました。' }));
+  const adminRow = await get('SELECT * FROM admins WHERE username = ?', [cleanUser]);
   if (!adminRow) return res.status(401).send(views.errorPage({ title: 'ログイン失敗', message: '認証に失敗しました。' }));
   const attempted = hashPassword(password, adminRow.password_salt).hash;
   if (!safeCompare(attempted, adminRow.password_hash)) return res.status(401).send(views.errorPage({ title: 'ログイン失敗', message: '認証に失敗しました。' }));
@@ -486,7 +500,9 @@ app.get('/viewer/login', async (req, res) => {
 
 app.post('/viewer/login', async (req, res) => {
   const { username = '', password = '' } = req.body;
-  const viewerRow = await get('SELECT * FROM box_viewers WHERE username = ?', [username.trim()]);
+  const cleanUser = normalizeUsername(username);
+  if (!cleanUser || !isValidPassword(password)) return res.status(401).send(views.errorPage({ title: 'ログイン失敗', message: '認証に失敗しました。' }));
+  const viewerRow = await get('SELECT * FROM box_viewers WHERE username = ?', [cleanUser]);
   if (!viewerRow) return res.status(401).send(views.errorPage({ title: 'ログイン失敗', message: '認証に失敗しました。' }));
   const attempted = hashPassword(password, viewerRow.password_salt).hash;
   if (!safeCompare(attempted, viewerRow.password_hash)) return res.status(401).send(views.errorPage({ title: 'ログイン失敗', message: '認証に失敗しました。' }));
@@ -539,9 +555,9 @@ app.get('/admin', requireAdmin(async (_, res, admin) => {
 
 app.post('/admin/viewers/create', requireAdmin(async (req, res, admin) => {
   const { username = '', password = '', boxId = '' } = req.body;
-  const cleanUser = username.trim();
+  const cleanUser = normalizeUsername(username);
   const box = await get('SELECT id FROM boxes WHERE id = ?', [boxId]);
-  if (!cleanUser || password.length < 8 || !box) {
+  if (!isValidUsername(cleanUser) || !isValidPassword(password) || !box) {
     return res.status(400).send(views.errorPage({ actor: admin, message: '閲覧アカウント作成の入力値が不正です。' }));
   }
   const { salt, hash } = hashPassword(password);
