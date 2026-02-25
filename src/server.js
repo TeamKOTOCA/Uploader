@@ -14,8 +14,9 @@ const DATA_DIR = path.join(__dirname, '..', 'data');
 const UPLOAD_DIR = path.join(DATA_DIR, '..', 'uploads');
 const HEADER_DIR = path.join(UPLOAD_DIR, 'headers');
 const DB_PATH = path.join(DATA_DIR, 'uploader.db');
-const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
-const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
+let vapidPublicKey = process.env.VAPID_PUBLIC_KEY || '';
+let vapidPrivateKey = process.env.VAPID_PRIVATE_KEY || '';
+let vapidSubject = process.env.VAPID_SUBJECT || 'mailto:admin@example.com';
 const AUTH_FAILURE_WINDOW_MINUTES = 15;
 const AUTH_FAILURE_LIMIT = 8;
 const AUTH_BLOCK_MINUTES = 20;
@@ -24,15 +25,48 @@ const UPLOAD_WINDOW_LONG_MINUTES = 60;
 const UPLOAD_ATTEMPT_LIMIT_SHORT = 6;
 const UPLOAD_ATTEMPT_LIMIT_LONG = 20;
 
-if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
-  webpush.setVapidDetails('mailto:admin@example.com', VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+function configureWebPush() {
+  if (vapidPublicKey && vapidPrivateKey) {
+    webpush.setVapidDetails(vapidSubject || 'mailto:admin@example.com', vapidPublicKey, vapidPrivateKey);
+  }
 }
+
+configureWebPush();
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 fs.mkdirSync(HEADER_DIR, { recursive: true });
 
 const db = new sqlite3.Database(DB_PATH);
+
+
+async function getSetting(key) {
+  const row = await get('SELECT value FROM app_settings WHERE key = ?', [key]);
+  return row ? row.value : null;
+}
+
+async function setSetting(key, value) {
+  await run(
+    `INSERT INTO app_settings (key, value, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    [key, value, nowIso()],
+  );
+}
+
+async function loadPushConfig() {
+  const dbPublic = await getSetting('vapid_public_key');
+  const dbPrivate = await getSetting('vapid_private_key');
+  const dbSubject = await getSetting('vapid_subject');
+  if (dbPublic !== null) vapidPublicKey = dbPublic;
+  if (dbPrivate !== null) vapidPrivateKey = dbPrivate;
+  if (dbSubject !== null) vapidSubject = dbSubject;
+  configureWebPush();
+}
+
+function hasPushConfig() {
+  return Boolean(vapidPublicKey && vapidPrivateKey);
+}
 
 function run(sql, params = []) {
   return new Promise((resolve, reject) => {
@@ -197,6 +231,11 @@ async function initDb() {
     created_at TEXT NOT NULL,
     FOREIGN KEY(box_id) REFERENCES boxes(id)
   )`);
+  await run(`CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`);
 
   await ensureColumn('boxes', 'header_image_path', 'TEXT');
   await ensureColumn('boxes', 'public_notice', 'TEXT');
@@ -209,6 +248,9 @@ async function initDb() {
   await ensureColumn('boxes', 'custom_css', 'TEXT');
   await ensureColumn('boxes', 'require_uploader_note', 'INTEGER NOT NULL DEFAULT 0');
   await ensureColumn('boxes', 'success_redirect_url', 'TEXT');
+  await ensureColumn('boxes', 'max_file_size_bytes', 'INTEGER');
+
+  await run('UPDATE boxes SET max_file_size_bytes = max_file_size_mb * 1024 * 1024 WHERE max_file_size_bytes IS NULL AND max_file_size_mb IS NOT NULL');
 }
 
 function nowIso() {
@@ -355,11 +397,16 @@ function normalizeFontFamily(value) {
 
 function normalizeBoxInput(body) {
   const extList = (body.allowedExtensions || '').split(',').map((v) => v.trim().toLowerCase().replace(/^\./, '')).filter((v) => /^[a-z0-9]+$/.test(v));
+  const sizeUnits = { KB: 1024, MB: 1024 * 1024, GB: 1024 * 1024 * 1024, TB: 1024 * 1024 * 1024 * 1024 };
+  const maxFileSizeUnit = String(body.maxFileSizeUnit || 'MB').toUpperCase();
+  const maxFileSizeValue = toNonNegativeInt(body.maxFileSizeValue, 0);
+  const multiplier = sizeUnits[maxFileSizeUnit] || sizeUnits.MB;
+  const maxFileSizeBytes = maxFileSizeValue > 0 ? maxFileSizeValue * multiplier : 0;
   return {
     title: (body.title || '').trim(),
     description: (body.description || '').trim(),
     extList,
-    maxFileSizeMb: toNonNegativeInt(body.maxFileSizeMb, 0),
+    maxFileSizeBytes,
     maxFilesPerUpload: Number.parseInt(body.maxFilesPerUpload, 10),
     maxTotalFiles: body.maxTotalFiles ? Number.parseInt(body.maxTotalFiles, 10) : null,
     boxPassword: (body.boxPassword || '').trim(),
@@ -374,6 +421,12 @@ function normalizeBoxInput(body) {
     customCss: (body.customCss || '').trim().slice(0, 1500),
     successRedirectUrl: (body.successRedirectUrl || '').trim(),
   };
+}
+
+function getBoxMaxSizeBytes(box) {
+  if (Number.isInteger(box.max_file_size_bytes) && box.max_file_size_bytes > 0) return box.max_file_size_bytes;
+  if (Number.isInteger(box.max_file_size_mb) && box.max_file_size_mb > 0) return box.max_file_size_mb * 1024 * 1024;
+  return 0;
 }
 
 function toNonNegativeInt(value, fallback = 0) {
@@ -504,7 +557,7 @@ async function recordUploadAttempt(subjectKey, boxId, wasSuccess) {
 }
 
 async function sendUploadPush(box, filesCount) {
-  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
+  if (!hasPushConfig()) return;
   const targets = await all(
     `SELECT ns.id, ns.endpoint, ns.p256dh, ns.auth
      FROM notification_subscriptions ns
@@ -718,7 +771,7 @@ app.get('/viewer', async (req, res) => {
   const rows = boxes.map((b) => ({ ...b, is_expired: isBoxExpired(b) }));
   const pushSettings = await all('SELECT box_id, is_enabled FROM notification_box_settings WHERE actor_type = ? AND actor_id = ?', ['viewer', viewer.id]);
   const pushMap = Object.fromEntries(pushSettings.map((r) => [String(r.box_id), r.is_enabled]));
-  return res.send(views.viewerDashboardPage({ actor: viewer, boxes: rows, pushMap, vapidEnabled: Boolean(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) }));
+  return res.send(views.viewerDashboardPage({ actor: viewer, boxes: rows, pushMap, vapidEnabled: hasPushConfig() }));
 });
 
 app.get('/admin', requireAdmin(async (_, res, admin) => {
@@ -739,7 +792,8 @@ app.get('/admin', requireAdmin(async (_, res, admin) => {
   const analyticsSummary = await all(`SELECT event_type, COUNT(*) AS total FROM analytics_events WHERE julianday(created_at) >= julianday('now', '-30 days') GROUP BY event_type ORDER BY total DESC`);
   const uploadsByDay = await all(`SELECT strftime('%Y-%m-%d', created_at) AS day, COUNT(*) AS total FROM analytics_events WHERE event_type = 'upload_success' AND julianday(created_at) >= julianday('now', '-14 days') GROUP BY day ORDER BY day DESC`);
   const boxPerformance = await all(`SELECT boxes.id, boxes.title, SUM(CASE WHEN analytics_events.event_type = 'page_box' THEN 1 ELSE 0 END) AS views, SUM(CASE WHEN analytics_events.event_type = 'upload_success' THEN 1 ELSE 0 END) AS uploads FROM boxes LEFT JOIN analytics_events ON analytics_events.box_id = boxes.id AND julianday(analytics_events.created_at) >= julianday('now', '-30 days') GROUP BY boxes.id ORDER BY uploads DESC, views DESC`);
-  return res.send(views.adminDashboardPage({ actor: admin, boxes, admins, viewers, pushMap, vapidEnabled: Boolean(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY), bans: banRows, analyticsSummary, uploadsByDay, boxPerformance }));
+  const vapidConfig = { publicKey: vapidPublicKey, privateKey: vapidPrivateKey, subject: vapidSubject };
+  return res.send(views.adminDashboardPage({ actor: admin, boxes, admins, viewers, pushMap, vapidEnabled: hasPushConfig(), vapidConfig, bans: banRows, analyticsSummary, uploadsByDay, boxPerformance }));
 }));
 
 app.post('/admin/viewers/create', requireAdmin(async (req, res, admin) => {
@@ -770,12 +824,33 @@ app.post('/admin/viewers/:id/assign', requireAdmin(async (req, res, admin) => {
   return redirect(res, '/admin');
 }));
 
+app.post('/admin/push-config', requireAdmin(async (req, res, admin) => {
+  const publicKey = (req.body.vapidPublicKey || '').trim();
+  const privateKey = (req.body.vapidPrivateKey || '').trim();
+  const subject = (req.body.vapidSubject || '').trim() || 'mailto:admin@example.com';
+  if ((publicKey && !privateKey) || (!publicKey && privateKey)) {
+    return res.status(400).send(views.errorPage({ actor: admin, title: '入力エラー', message: 'VAPID公開鍵と秘密鍵はセットで入力してください。' }));
+  }
+  if (subject && !/^mailto:.+@.+\..+$/i.test(subject) && !/^https?:\/\/.+/i.test(subject)) {
+    return res.status(400).send(views.errorPage({ actor: admin, title: '入力エラー', message: 'VAPID Subject は mailto: または http(s) URL を指定してください。' }));
+  }
+
+  vapidPublicKey = publicKey;
+  vapidPrivateKey = privateKey;
+  vapidSubject = subject;
+  await setSetting('vapid_public_key', vapidPublicKey);
+  await setSetting('vapid_private_key', vapidPrivateKey);
+  await setSetting('vapid_subject', vapidSubject);
+  configureWebPush();
+  return redirect(res, '/admin');
+}));
+
 
 app.get('/push/vapid-public-key', async (req, res) => {
   const actor = await resolveActor(req);
   if (!actor) return res.status(401).json({ error: 'auth required' });
-  if (!VAPID_PUBLIC_KEY) return res.status(503).json({ error: 'push unavailable' });
-  return res.json({ key: VAPID_PUBLIC_KEY });
+  if (!vapidPublicKey) return res.status(503).json({ error: 'push unavailable' });
+  return res.json({ key: vapidPublicKey });
 });
 
 app.post('/push/subscribe', async (req, res) => {
@@ -818,7 +893,7 @@ function saveBoxHandler(mode) {
       if (err) return res.status(400).send(views.errorPage({ actor: admin, message: err.message }));
 
       const input = normalizeBoxInput(req.body);
-      if (!input.title || input.extList.length === 0 || !Number.isInteger(input.maxFilesPerUpload) || input.maxFilesPerUpload < 1) {
+      if (!input.title || !Number.isInteger(input.maxFilesPerUpload) || input.maxFilesPerUpload < 1) {
         if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
         return res.status(400).send(views.errorPage({ actor: admin, message: '入力値が不正です。' }));
       }
@@ -837,14 +912,15 @@ function saveBoxHandler(mode) {
         if (input.boxPassword) ({ hash: passwordHash, salt: passwordSalt } = hashPassword(input.boxPassword));
 
         await run(
-          `INSERT INTO boxes (title, slug, description, allowed_extensions, max_file_size_mb, max_files_per_upload, password_hash, password_salt, discord_webhook_url, is_active, created_by_admin_id, created_at, header_image_path, public_notice, success_message, require_uploader_name, max_total_files, expires_at, font_family, accent_color, custom_css, require_uploader_note, success_redirect_url)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO boxes (title, slug, description, allowed_extensions, max_file_size_mb, max_file_size_bytes, max_files_per_upload, password_hash, password_salt, discord_webhook_url, is_active, created_by_admin_id, created_at, header_image_path, public_notice, success_message, require_uploader_name, max_total_files, expires_at, font_family, accent_color, custom_css, require_uploader_note, success_redirect_url)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             input.title,
             slug,
             input.description,
             input.extList.join(','),
-            input.maxFileSizeMb,
+            Math.floor(input.maxFileSizeBytes / (1024 * 1024)),
+            input.maxFileSizeBytes,
             input.maxFilesPerUpload,
             passwordHash,
             passwordSalt,
@@ -889,12 +965,13 @@ function saveBoxHandler(mode) {
       }
 
       await run(
-        `UPDATE boxes SET title = ?, description = ?, allowed_extensions = ?, max_file_size_mb = ?, max_files_per_upload = ?, password_hash = ?, password_salt = ?, discord_webhook_url = ?, header_image_path = ?, public_notice = ?, success_message = ?, require_uploader_name = ?, max_total_files = ?, expires_at = ?, font_family = ?, accent_color = ?, custom_css = ?, require_uploader_note = ?, success_redirect_url = ? WHERE id = ?`,
+        `UPDATE boxes SET title = ?, description = ?, allowed_extensions = ?, max_file_size_mb = ?, max_file_size_bytes = ?, max_files_per_upload = ?, password_hash = ?, password_salt = ?, discord_webhook_url = ?, header_image_path = ?, public_notice = ?, success_message = ?, require_uploader_name = ?, max_total_files = ?, expires_at = ?, font_family = ?, accent_color = ?, custom_css = ?, require_uploader_note = ?, success_redirect_url = ? WHERE id = ?`,
         [
           input.title,
           input.description,
           input.extList.join(','),
-          input.maxFileSizeMb,
+          Math.floor(input.maxFileSizeBytes / (1024 * 1024)),
+          input.maxFileSizeBytes,
           input.maxFilesPerUpload,
           passwordHash,
           passwordSalt,
@@ -996,16 +1073,18 @@ app.post('/box/:slug/upload', (req, res, next) => {
     }
   }
 
-  const allowed = new Set(box.allowed_extensions.split(',').map((s) => s.trim().toLowerCase()));
+  const allowed = new Set((box.allowed_extensions || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean));
+  const maxSizeBytes = getBoxMaxSizeBytes(box);
   for (const file of files) {
     const ext = path.extname(file.originalname).toLowerCase().replace(/^\./, '');
-    if (!allowed.has(ext)) {
+    if (allowed.size > 0 && !allowed.has(ext)) {
       cleanup();
       await recordViolation(visitorKey, `許可外拡張子: ${file.originalname}`);
       return res.status(400).send(views.errorPage({ actor, title: 'アップロード失敗', message: `許可されていない拡張子: ${file.originalname}` }));
     }
-    if (box.max_file_size_mb && file.size > box.max_file_size_mb * 1024 * 1024) {
+    if (maxSizeBytes && file.size > maxSizeBytes) {
       cleanup();
+      await recordViolation(visitorKey, `サイズ超過: ${file.originalname}`);
       return res.status(400).send(views.errorPage({ actor, title: 'アップロード失敗', message: `サイズ超過: ${file.originalname}` }));
     }
   }
@@ -1169,6 +1248,7 @@ app.use(async (err, req, res, _next) => {
 });
 
 initDb().then(async () => {
+  await loadPushConfig();
   const adminCount = await get('SELECT COUNT(*) AS c FROM admins');
   app.listen(PORT, () => {
     console.log(`Uploader started on http://0.0.0.0:${PORT}`);

@@ -69,6 +69,41 @@ function viewerLoginPage({ actor }) {
 }
 
 
+
+function formatFileSize(bytes) {
+  const value = Number(bytes) || 0;
+  if (!value) return '無制限';
+  const units = [
+    { unit: 'TB', size: 1024 ** 4 },
+    { unit: 'GB', size: 1024 ** 3 },
+    { unit: 'MB', size: 1024 ** 2 },
+    { unit: 'KB', size: 1024 },
+  ];
+  const picked = units.find((item) => value >= item.size) || units[units.length - 1];
+  const amount = value / picked.size;
+  const rounded = amount >= 10 ? Math.round(amount * 10) / 10 : Math.round(amount * 100) / 100;
+  return `${rounded}${picked.unit}`;
+}
+
+function splitSizeForInput(bytes) {
+  const value = Number(bytes) || 0;
+  if (!value) return { amount: 0, unit: 'MB' };
+  const units = [
+    { unit: 'TB', size: 1024 ** 4 },
+    { unit: 'GB', size: 1024 ** 3 },
+    { unit: 'MB', size: 1024 ** 2 },
+    { unit: 'KB', size: 1024 },
+  ];
+  const picked = units.find((item) => value % item.size === 0) || units.find((item) => value >= item.size) || units[2];
+  return { amount: Math.max(1, Math.round(value / picked.size)), unit: picked.unit };
+}
+
+function isImageFile(file) {
+  const mime = String(file.mime_type || '').toLowerCase();
+  const ext = String(file.original_name || '').toLowerCase();
+  return mime.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)$/.test(ext);
+}
+
 function extensionOptions() {
   return ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg', 'pdf', 'txt', 'md', 'csv', 'json', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'zip', '7z', 'rar', 'mp3', 'wav', 'aac', 'flac', 'mp4', 'mov', 'mkv'];
 }
@@ -92,8 +127,8 @@ function boxFormFields(box = {}) {
     </label>
     <label>アクセントカラー<input type="color" name="accentColor" value="${escapeHtml(box.accent_color || '#2563eb')}" /></label>
     <label>追加CSS（任意）<textarea name="customCss" rows="4" maxlength="1500">${escapeHtml(box.custom_css || '')}</textarea></label>
-    <label>許可拡張子（タグ入力 + 手動入力対応）
-      <input id="allowedExtensionsInput" name="allowedExtensions" required value="${escapeHtml(box.allowed_extensions || '')}" />
+    <label>許可拡張子（タグ入力 + 手動入力対応 / 空欄で全拡張子を許可）
+      <input id="allowedExtensionsInput" name="allowedExtensions" value="${escapeHtml(box.allowed_extensions || '')}" />
     </label>
     <div class="ext-tools">
       <div class="ext-presets">
@@ -111,7 +146,12 @@ function boxFormFields(box = {}) {
       <p class="muted">下の候補をクリックして追加できます。最終的にはカンマ区切りとして保存されます。</p>
       <div id="selectedExtensions" class="tag-list" aria-live="polite"></div>
     </div>
-    <label>最大ファイルサイズ(MB / 0または空で無制限)<input type="number" name="maxFileSizeMb" min="0" max="4096" value="${box.max_file_size_mb || 0}" /></label>
+    <label>最大ファイルサイズ（0または空で無制限）
+      ${(() => {
+        const { amount, unit } = splitSizeForInput(box.max_file_size_bytes || ((box.max_file_size_mb || 0) * 1024 * 1024));
+        return `<div class="inline-size"><input type="number" name="maxFileSizeValue" min="0" max="1048576" value="${amount}" /><select name="maxFileSizeUnit"><option value="KB" ${unit === 'KB' ? 'selected' : ''}>KB</option><option value="MB" ${unit === 'MB' ? 'selected' : ''}>MB</option><option value="GB" ${unit === 'GB' ? 'selected' : ''}>GB</option><option value="TB" ${unit === 'TB' ? 'selected' : ''}>TB</option></select></div>`;
+      })()}
+    </label>
     <label>最大ファイル数/回<input type="number" name="maxFilesPerUpload" min="1" max="1000" value="${box.max_files_per_upload || 20}" required /></label>
     <label>最大総アップロード件数（任意）<input type="number" name="maxTotalFiles" min="1" max="100000" value="${box.max_total_files || ''}" /></label>
     <label>受付期限（任意）<input type="datetime-local" name="expiresAt" value="${expiresValue}" /></label>
@@ -123,12 +163,12 @@ function boxFormFields(box = {}) {
   `;
 }
 
-function adminDashboardPage({ actor, boxes, admins, viewers, pushMap = {}, vapidEnabled = false, bans = [], analyticsSummary = [], uploadsByDay = [], boxPerformance = [] }) {
+function adminDashboardPage({ actor, boxes, admins, viewers, pushMap = {}, vapidEnabled = false, vapidConfig = {}, bans = [], analyticsSummary = [], uploadsByDay = [], boxPerformance = [] }) {
   const boxRows = boxes.map((box) => `
     <tr>
       <td>${box.id}</td><td>${escapeHtml(box.title)}</td><td><a href="/box/${escapeHtml(box.slug)}">${escapeHtml(box.slug)}</a></td>
-      <td>${escapeHtml(box.allowed_extensions)}</td>
-      <td>${box.max_file_size_mb ? `${box.max_file_size_mb}MB` : '無制限'} / ${box.max_files_per_upload}件 / 総数${box.max_total_files || '無制限'}</td>
+      <td>${escapeHtml(box.allowed_extensions || 'すべて許可')}</td>
+      <td>${formatFileSize(box.max_file_size_bytes || ((box.max_file_size_mb || 0) * 1024 * 1024))} / ${box.max_files_per_upload}件 / 総数${box.max_total_files || '無制限'}</td>
       <td>${box.is_active ? '公開' : '停止'}</td>
       <td>
         <form class="inline-form" method="post" action="/push/boxes/${box.id}/toggle"><button class="btn secondary" type="submit">${pushMap[String(box.id)] ? 'Push ON' : 'Push OFF'}</button></form>
@@ -148,7 +188,7 @@ function adminDashboardPage({ actor, boxes, admins, viewers, pushMap = {}, vapid
     title: '管理画面',
     actor,
     body: `
-      <section class="card"><h2>通知設定</h2>${vapidEnabled ? '<button type="button" class="btn" id="enablePushBtn">このブラウザでPush通知を有効化</button><p class="muted">有効化後、各ボックスの Push ON/OFF を切り替えできます。</p>' : '<p class="notice-info">Push通知は未設定です。環境変数 VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY を設定してください。</p>'}</section>
+      <section class="grid two"><div class="card"><h2>通知設定</h2>${vapidEnabled ? '<button type="button" class="btn" id="enablePushBtn">このブラウザでPush通知を有効化</button><p class="muted">有効化後、各ボックスの Push ON/OFF を切り替えできます。</p>' : '<p class="notice-info">Push通知は未設定です。下のVAPID設定を保存してください。</p>'}</div><div class="card"><h2>VAPID Key設定</h2><form method="post" action="/admin/push-config"><label>VAPID Subject<input name="vapidSubject" maxlength="300" placeholder="mailto:admin@example.com" value="${escapeHtml(vapidConfig.subject || 'mailto:admin@example.com')}" /></label><label>VAPID Public Key<input name="vapidPublicKey" maxlength="300" value="${escapeHtml(vapidConfig.publicKey || '')}" /></label><label>VAPID Private Key<input name="vapidPrivateKey" maxlength="300" value="${escapeHtml(vapidConfig.privateKey || '')}" /></label><p class="muted">無効化したい場合は公開鍵・秘密鍵を両方空欄にして保存してください。</p><button class="btn" type="submit">VAPID設定を保存</button></form></div></section>
       <section class="tabs" data-tabs>
         <div class="tab-buttons">
           <button class="btn secondary" type="button" data-tab-target="tab-boxes">募集ボックス</button>
@@ -191,7 +231,7 @@ function boxPublicPage({ actor, box, currentCount }) {
     title: `アップロード: ${box.title}`,
     actor,
     extraHead,
-    body: `<section class="card">${box.header_image_path ? `<img class="box-header" src="/box-assets/${encodeURIComponent(box.header_image_path)}" alt="header" />` : ''}<h2>${escapeHtml(box.title)}</h2><p class="muted">${escapeHtml(box.description || '説明なし')}</p>${box.public_notice ? `<p class="notice-info">${escapeHtml(box.public_notice)}</p>` : ''}<p>許可形式: <span class="kbd">${escapeHtml(box.allowed_extensions)}</span> / 最大サイズ: <span class="kbd">${box.max_file_size_mb ? `${box.max_file_size_mb}MB` : '無制限'}</span> / 最大数: <span class="kbd">${box.max_files_per_upload}</span> / 現在件数: <span class="kbd">${currentCount}${box.max_total_files ? ` / ${box.max_total_files}` : ''}</span></p><form id="uploadForm" method="post" action="/box/${encodeURIComponent(box.slug)}/upload" enctype="multipart/form-data">${box.password_hash ? '<label>募集ボックスパスワード<input type="password" name="boxPassword" required /></label>' : ''}${box.require_uploader_name ? '<label>送信者名<input name="uploaderName" maxlength="100" required /></label>' : '<label>送信者名（任意）<input name="uploaderName" maxlength="100" /></label>'}${box.require_uploader_note ? '<label>メモ<input name="uploaderNote" maxlength="200" required /></label>' : '<label>メモ（任意）<textarea name="uploaderNote" rows="2" maxlength="200"></textarea></label>'}<label>ファイル<input id="uploadFilesInput" type="file" name="files" multiple required /></label><div id="uploadDropzone" class="upload-dropzone" tabindex="0">ここにファイルをドラッグ&ドロップ</div><ul id="selectedUploadFiles" class="file-list" aria-live="polite"></ul><div class="upload-progress-wrap"><progress id="uploadProgress" max="100" value="0"></progress><span id="uploadProgressText" class="muted">0%</span></div><button class="btn" type="submit">アップロード</button></form></section>`,
+    body: `<section class="card">${box.header_image_path ? `<img class="box-header" src="/box-assets/${encodeURIComponent(box.header_image_path)}" alt="header" />` : ''}<h2>${escapeHtml(box.title)}</h2><p class="muted">${escapeHtml(box.description || '説明なし')}</p>${box.public_notice ? `<p class="notice-info">${escapeHtml(box.public_notice)}</p>` : ''}<p>許可形式: <span class="kbd">${escapeHtml(box.allowed_extensions || 'すべて許可')}</span> / 最大サイズ: <span class="kbd">${formatFileSize(box.max_file_size_bytes || ((box.max_file_size_mb || 0) * 1024 * 1024))}</span> / 最大数: <span class="kbd">${box.max_files_per_upload}</span> / 現在件数: <span class="kbd">${currentCount}${box.max_total_files ? ` / ${box.max_total_files}` : ''}</span></p><form id="uploadForm" method="post" action="/box/${encodeURIComponent(box.slug)}/upload" enctype="multipart/form-data">${box.password_hash ? '<label>募集ボックスパスワード<input type="password" name="boxPassword" required /></label>' : ''}${box.require_uploader_name ? '<label>送信者名<input name="uploaderName" maxlength="100" required /></label>' : '<label>送信者名（任意）<input name="uploaderName" maxlength="100" /></label>'}${box.require_uploader_note ? '<label>メモ<input name="uploaderNote" maxlength="200" required /></label>' : '<label>メモ（任意）<textarea name="uploaderNote" rows="2" maxlength="200"></textarea></label>'}<label>ファイル<input id="uploadFilesInput" type="file" name="files" multiple required /></label><div id="uploadDropzone" class="upload-dropzone" tabindex="0">ここにファイルをドラッグ&ドロップ</div><ul id="selectedUploadFiles" class="file-list" aria-live="polite"></ul><div class="upload-progress-wrap"><progress id="uploadProgress" max="100" value="0"></progress><span id="uploadProgressText" class="muted">0%</span></div><button class="btn" type="submit">アップロード</button></form></section>`,
   });
 }
 
@@ -200,9 +240,9 @@ function uploadDonePage({ actor, box, count }) {
 }
 
 function filesPage({ actor, box, files }) {
-  const rows = files.map((file) => `<tr><td><input class="bulk-file-id" type="checkbox" name="fileIds" value="${file.id}" /></td><td>${file.id}</td><td>${escapeHtml(file.uploader_name || '-')}</td><td>${escapeHtml(file.uploader_note || '-')}</td><td>${escapeHtml(file.original_name)}</td><td>${Math.round(file.size_bytes / 1024)} KB</td><td>${escapeHtml(file.uploader_ip || '-')}</td><td>${escapeHtml(file.uploaded_at)}</td><td><a class="btn secondary" href="/files/${file.id}/preview">プレビュー</a><a class="btn secondary" href="/files/${file.id}/download">ダウンロード</a></td></tr>`).join('');
+  const rows = files.map((file) => `<tr><td><input class="bulk-file-id" type="checkbox" name="fileIds" value="${file.id}" /></td><td>${file.id}</td><td>${isImageFile(file) ? `<img class="file-thumb" src="/files/${file.id}/raw" alt="thumb-${file.id}" loading="lazy" />` : '<span class="file-thumb-placeholder">-</span>'}</td><td>${escapeHtml(file.uploader_name || '-')}</td><td>${escapeHtml(file.uploader_note || '-')}</td><td>${escapeHtml(file.original_name)}</td><td>${Math.round(file.size_bytes / 1024)} KB</td><td>${escapeHtml(file.uploader_ip || '-')}</td><td>${escapeHtml(file.uploaded_at)}</td><td><a class="btn secondary" href="/files/${file.id}/preview">プレビュー</a><a class="btn secondary" href="/files/${file.id}/download">ダウンロード</a></td></tr>`).join('');
   const deleteForm = actor.role === 'admin' ? `<form id="bulkDeleteForm" method="post" action="/admin/files/bulk-delete"><input type="hidden" name="boxId" value="${box.id}" /><input type="hidden" name="fileIds" id="bulkDeleteIds" /><button class="btn secondary" type="submit">選択ファイルを削除</button></form>` : '';
-  return layout({ title: `ファイル一覧: ${box.title}`, actor, body: `<section class="card"><h2>${escapeHtml(box.title)} のアップロードファイル</h2><p><a class="btn secondary" href="${actor.role === 'admin' ? '/admin' : '/viewer'}">戻る</a></p><div class="bulk-actions"><button class="btn secondary" type="button" id="bulkSelectAll">すべて選択/解除</button><form id="bulkDownloadForm" method="post" action="/files/bulk-download"><input type="hidden" name="boxId" value="${box.id}" /><input type="hidden" name="fileIds" id="bulkDownloadIds" /><button class="btn secondary" type="submit">選択をZIPダウンロード</button></form>${deleteForm}</div><label>絞り込み<input id="fileFilterInput" placeholder="ファイル名 / 送信者名で検索" /></label><div class="table-wrap"><table id="filesTable"><thead><tr><th>選択</th><th>ID</th><th>送信者名</th><th>メモ</th><th>ファイル名</th><th>サイズ</th><th>IP</th><th>日時</th><th>操作</th></tr></thead><tbody>${rows || '<tr><td colspan="9">まだアップロードなし</td></tr>'}</tbody></table></div></section>` });
+  return layout({ title: `ファイル一覧: ${box.title}`, actor, body: `<section class="card"><h2>${escapeHtml(box.title)} のアップロードファイル</h2><p><a class="btn secondary" href="${actor.role === 'admin' ? '/admin' : '/viewer'}">戻る</a></p><div class="bulk-actions"><button class="btn secondary" type="button" id="bulkSelectAll">すべて選択/解除</button><form id="bulkDownloadForm" method="post" action="/files/bulk-download"><input type="hidden" name="boxId" value="${box.id}" /><input type="hidden" name="fileIds" id="bulkDownloadIds" /><button class="btn secondary" type="submit">選択をZIPダウンロード</button></form>${deleteForm}</div><label>絞り込み<input id="fileFilterInput" placeholder="ファイル名 / 送信者名で検索" /></label><div class="table-wrap"><table id="filesTable"><thead><tr><th>選択</th><th>ID</th><th>サムネイル</th><th>送信者名</th><th>メモ</th><th>ファイル名</th><th>サイズ</th><th>IP</th><th>日時</th><th>操作</th></tr></thead><tbody>${rows || '<tr><td colspan="10">まだアップロードなし</td></tr>'}</tbody></table></div></section>` });
 }
 
 function previewPage({ actor, file, previewType, content = '' }) {

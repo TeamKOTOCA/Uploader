@@ -135,6 +135,12 @@
         progressText.textContent = `${ratio}%`;
       });
       xhr.addEventListener('load', () => {
+        if (xhr.responseText && String(xhr.responseText).includes('<!doctype html>')) {
+          document.open();
+          document.write(xhr.responseText);
+          document.close();
+          return;
+        }
         if (xhr.status >= 200 && xhr.status < 400) {
           document.open();
           document.write(xhr.responseText);
