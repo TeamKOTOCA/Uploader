@@ -193,3 +193,30 @@ th { background: var(--surface-alt); }
   margin: .55rem 0;
 }
 .bulk-actions form { margin: 0; }
+
+.inline-size {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 120px;
+  gap: .45rem;
+}
+
+.file-thumb {
+  width: 92px;
+  height: 58px;
+  object-fit: cover;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: #fff;
+}
+
+.file-thumb-placeholder {
+  display: inline-flex;
+  width: 92px;
+  height: 58px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: #f5f5f5;
+  color: var(--muted);
+}
