@@ -80,11 +80,115 @@
   function wireUploadFileList() {
     const input = document.getElementById('uploadFilesInput');
     const list = document.getElementById('selectedUploadFiles');
-    if (!input || !list) return;
-    input.addEventListener('change', () => {
+    const form = document.getElementById('uploadForm');
+    const dropzone = document.getElementById('uploadDropzone');
+    const progress = document.getElementById('uploadProgress');
+    const progressText = document.getElementById('uploadProgressText');
+    if (!input || !list || !form) return;
+
+    function renderFiles() {
       const files = Array.from(input.files || []);
       list.innerHTML = files.map((file) => `<li>${file.name} <span class="muted">(${Math.round(file.size / 1024)} KB)</span></li>`).join('');
+    }
+
+    function assignFiles(fileList) {
+      const dt = new DataTransfer();
+      Array.from(fileList || []).forEach((file) => dt.items.add(file));
+      input.files = dt.files;
+      renderFiles();
+    }
+
+    input.addEventListener('change', renderFiles);
+
+    if (dropzone) {
+      ['dragenter', 'dragover'].forEach((eventName) => {
+        dropzone.addEventListener(eventName, (event) => {
+          event.preventDefault();
+          dropzone.classList.add('dragging');
+        });
+      });
+      ['dragleave', 'drop'].forEach((eventName) => {
+        dropzone.addEventListener(eventName, (event) => {
+          event.preventDefault();
+          dropzone.classList.remove('dragging');
+        });
+      });
+      dropzone.addEventListener('drop', (event) => assignFiles(event.dataTransfer.files));
+      dropzone.addEventListener('click', () => input.click());
+      dropzone.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          input.click();
+        }
+      });
+    }
+
+    form.addEventListener('submit', (event) => {
+      if (!progress || !progressText) return;
+      event.preventDefault();
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', form.action);
+      xhr.upload.addEventListener('progress', (e) => {
+        if (!e.lengthComputable) return;
+        const ratio = Math.min(100, Math.round((e.loaded / e.total) * 100));
+        progress.value = ratio;
+        progressText.textContent = `${ratio}%`;
+      });
+      xhr.addEventListener('load', () => {
+        if (xhr.status >= 200 && xhr.status < 400) {
+          document.open();
+          document.write(xhr.responseText);
+          document.close();
+          return;
+        }
+        showToast('アップロードに失敗しました');
+      });
+      xhr.addEventListener('error', () => showToast('アップロードに失敗しました'));
+      xhr.send(new FormData(form));
     });
+
+    renderFiles();
+  }
+
+  function wireBulkFileActions() {
+    const checks = Array.from(document.querySelectorAll('.bulk-file-id'));
+    if (checks.length === 0) return;
+    const selectAll = document.getElementById('bulkSelectAll');
+    const filterInput = document.getElementById('fileFilterInput');
+    const table = document.getElementById('filesTable');
+    const collectIds = () => checks.filter((c) => c.checked).map((c) => c.value).join(',');
+
+    function syncHidden(formId, hiddenId) {
+      const form = document.getElementById(formId);
+      const hidden = document.getElementById(hiddenId);
+      if (!form || !hidden) return;
+      form.addEventListener('submit', (event) => {
+        hidden.value = collectIds();
+        if (!hidden.value) {
+          event.preventDefault();
+          showToast('ファイルを選択してください');
+        }
+      });
+    }
+
+    syncHidden('bulkDownloadForm', 'bulkDownloadIds');
+    syncHidden('bulkDeleteForm', 'bulkDeleteIds');
+
+    if (selectAll) {
+      selectAll.addEventListener('click', () => {
+        const allChecked = checks.every((c) => c.checked);
+        checks.forEach((c) => { c.checked = !allChecked; });
+      });
+    }
+
+    if (filterInput && table) {
+      filterInput.addEventListener('input', () => {
+        const q = filterInput.value.trim().toLowerCase();
+        table.querySelectorAll('tbody tr').forEach((row) => {
+          row.style.display = row.textContent.toLowerCase().includes(q) ? '' : 'none';
+        });
+      });
+    }
   }
 
   async function enablePush() {
@@ -134,4 +238,5 @@
   wireTabs();
   wireExtensionBuilder();
   wireUploadFileList();
+  wireBulkFileActions();
 }());
