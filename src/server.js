@@ -15,6 +15,13 @@ const HEADER_DIR = path.join(UPLOAD_DIR, 'headers');
 const DB_PATH = path.join(DATA_DIR, 'uploader.db');
 const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
+const AUTH_FAILURE_WINDOW_MINUTES = 15;
+const AUTH_FAILURE_LIMIT = 8;
+const AUTH_BLOCK_MINUTES = 20;
+const UPLOAD_WINDOW_SHORT_MINUTES = 5;
+const UPLOAD_WINDOW_LONG_MINUTES = 60;
+const UPLOAD_ATTEMPT_LIMIT_SHORT = 6;
+const UPLOAD_ATTEMPT_LIMIT_LONG = 20;
 
 if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
   webpush.setVapidDetails('mailto:admin@example.com', VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
@@ -160,6 +167,27 @@ async function initDb() {
     reason TEXT NOT NULL,
     created_at TEXT NOT NULL
   )`);
+  await run(`CREATE TABLE IF NOT EXISTS login_blocks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_key TEXT UNIQUE NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS login_violations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_key TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS upload_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_key TEXT NOT NULL,
+    box_id INTEGER,
+    was_success INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(box_id) REFERENCES boxes(id)
+  )`);
 
   await ensureColumn('boxes', 'header_image_path', 'TEXT');
   await ensureColumn('boxes', 'public_notice', 'TEXT');
@@ -211,7 +239,8 @@ function parseCookies(req) {
 
 function setCookie(res, name, value, maxAgeSeconds) {
   const prev = res.getHeader('Set-Cookie');
-  const next = `${name}=${encodeURIComponent(value)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAgeSeconds}`;
+  const secureCookie = process.env.COOKIE_SECURE === '1' || process.env.NODE_ENV === 'production';
+  const next = `${name}=${encodeURIComponent(value)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAgeSeconds}${secureCookie ? '; Secure' : ''}`;
   if (!prev) {
     res.setHeader('Set-Cookie', [next]);
     return;
@@ -221,7 +250,8 @@ function setCookie(res, name, value, maxAgeSeconds) {
 
 function clearCookie(res, name) {
   const prev = res.getHeader('Set-Cookie');
-  const next = `${name}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0`;
+  const secureCookie = process.env.COOKIE_SECURE === '1' || process.env.NODE_ENV === 'production';
+  const next = `${name}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0${secureCookie ? '; Secure' : ''}`;
   if (!prev) {
     res.setHeader('Set-Cookie', [next]);
     return;
@@ -292,6 +322,18 @@ function isBoxExpired(box) {
 
 function getClientIp(req) {
   return req.headers['cf-connecting-ip'] || req.ip || '';
+}
+
+function hashKey(value) {
+  return crypto.createHash('sha256').update(String(value || '')).digest('hex');
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function delayAuthFailureResponse() {
+  await sleep(250 + Math.floor(Math.random() * 200));
 }
 
 function normalizeHexColor(value, fallback = '#2563eb') {
@@ -375,6 +417,83 @@ async function recordViolation(subjectKey, reason) {
   }
 }
 
+async function getActiveLoginBlock(subjectKey) {
+  const row = await get('SELECT id, reason, expires_at FROM login_blocks WHERE subject_key = ?', [subjectKey]);
+  if (!row) return null;
+  if (new Date(row.expires_at).getTime() < Date.now()) {
+    await run('DELETE FROM login_blocks WHERE id = ?', [row.id]);
+    return null;
+  }
+  return row;
+}
+
+async function isLoginBlocked(subjectKeys) {
+  for (const key of subjectKeys) {
+    const block = await getActiveLoginBlock(key);
+    if (block) return block;
+  }
+  return null;
+}
+
+async function recordLoginFailure(subjectKeys, reason) {
+  for (const key of subjectKeys) {
+    await run('INSERT INTO login_violations (subject_key, reason, created_at) VALUES (?, ?, ?)', [key, reason, nowIso()]);
+    const recent = await get(
+      `SELECT COUNT(*) AS c
+       FROM login_violations
+       WHERE subject_key = ? AND julianday(created_at) >= julianday('now', ?)` ,
+      [key, `-${AUTH_FAILURE_WINDOW_MINUTES} minutes`],
+    );
+    if (recent && recent.c >= AUTH_FAILURE_LIMIT) {
+      await run(
+        `INSERT INTO login_blocks (subject_key, reason, created_at, expires_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(subject_key) DO UPDATE SET reason = excluded.reason, created_at = excluded.created_at, expires_at = excluded.expires_at`,
+        [key, '短時間にログイン失敗が繰り返されました。', nowIso(), new Date(Date.now() + AUTH_BLOCK_MINUTES * 60 * 1000).toISOString()],
+      );
+    }
+  }
+}
+
+async function clearLoginViolations(subjectKeys) {
+  for (const key of subjectKeys) {
+    await run('DELETE FROM login_violations WHERE subject_key = ?', [key]);
+    await run('DELETE FROM login_blocks WHERE subject_key = ?', [key]);
+  }
+}
+
+function makeLoginSubjectKeys(req, actorType, username = '') {
+  const ipHash = hashKey(getClientIp(req) || 'unknown-ip');
+  const normalized = normalizeUsername(username).toLowerCase();
+  const keys = [`login-ip:${ipHash}`];
+  if (normalized) keys.push(`login-${actorType}:${hashKey(normalized)}:${ipHash}`);
+  return keys;
+}
+
+async function enforceUploadRateLimit(subjectKey, boxId) {
+  const byBox = await get(
+    `SELECT COUNT(*) AS c FROM upload_attempts
+     WHERE subject_key = ? AND box_id = ? AND julianday(created_at) >= julianday('now', ?)`,
+    [subjectKey, boxId, `-${UPLOAD_WINDOW_SHORT_MINUTES} minutes`],
+  );
+  if (byBox && byBox.c >= UPLOAD_ATTEMPT_LIMIT_SHORT) {
+    return `短時間に操作が集中しています。${UPLOAD_WINDOW_SHORT_MINUTES}分ほど待ってから再試行してください。`;
+  }
+  const globalRecent = await get(
+    `SELECT COUNT(*) AS c FROM upload_attempts
+     WHERE subject_key = ? AND julianday(created_at) >= julianday('now', ?)`,
+    [subjectKey, `-${UPLOAD_WINDOW_LONG_MINUTES} minutes`],
+  );
+  if (globalRecent && globalRecent.c >= UPLOAD_ATTEMPT_LIMIT_LONG) {
+    return `アップロード試行回数が多すぎます。${UPLOAD_WINDOW_LONG_MINUTES}分以内に再試行してください。`;
+  }
+  return null;
+}
+
+async function recordUploadAttempt(subjectKey, boxId, wasSuccess) {
+  await run('INSERT INTO upload_attempts (subject_key, box_id, was_success, created_at) VALUES (?, ?, ?, ?)', [subjectKey, boxId || null, wasSuccess ? 1 : 0, nowIso()]);
+}
+
 async function sendUploadPush(box, filesCount) {
   if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
   const targets = await all(
@@ -409,6 +528,12 @@ async function postDiscordNotification(webhookUrl, boxTitle, files, uploaderName
 app.set('trust proxy', true);
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
+app.use((_, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  next();
+});
 app.use('/assets', express.static(path.join(__dirname, '..', 'public')));
 app.use('/box-assets', express.static(HEADER_DIR));
 
@@ -476,11 +601,29 @@ app.get('/admin/login', async (req, res) => {
 app.post('/admin/login', async (req, res) => {
   const { username = '', password = '' } = req.body;
   const cleanUser = normalizeUsername(username);
-  if (!cleanUser || !isValidPassword(password)) return res.status(401).send(views.errorPage({ title: 'ログイン失敗', message: '認証に失敗しました。' }));
+  const subjectKeys = makeLoginSubjectKeys(req, 'admin', cleanUser);
+  if (await isLoginBlocked(subjectKeys)) {
+    await delayAuthFailureResponse();
+    return res.status(429).send(views.errorPage({ title: 'ログイン制限', message: '短時間に試行が集中したため、少し時間を置いてから再度お試しください。' }));
+  }
+  if (!cleanUser || !isValidPassword(password)) {
+    await recordLoginFailure(subjectKeys, '形式不正');
+    await delayAuthFailureResponse();
+    return res.status(401).send(views.errorPage({ title: 'ログイン失敗', message: '認証に失敗しました。' }));
+  }
   const adminRow = await get('SELECT * FROM admins WHERE username = ?', [cleanUser]);
-  if (!adminRow) return res.status(401).send(views.errorPage({ title: 'ログイン失敗', message: '認証に失敗しました。' }));
+  if (!adminRow) {
+    await recordLoginFailure(subjectKeys, 'ユーザー不一致');
+    await delayAuthFailureResponse();
+    return res.status(401).send(views.errorPage({ title: 'ログイン失敗', message: '認証に失敗しました。' }));
+  }
   const attempted = hashPassword(password, adminRow.password_salt).hash;
-  if (!safeCompare(attempted, adminRow.password_hash)) return res.status(401).send(views.errorPage({ title: 'ログイン失敗', message: '認証に失敗しました。' }));
+  if (!safeCompare(attempted, adminRow.password_hash)) {
+    await recordLoginFailure(subjectKeys, 'パスワード不一致');
+    await delayAuthFailureResponse();
+    return res.status(401).send(views.errorPage({ title: 'ログイン失敗', message: '認証に失敗しました。' }));
+  }
+  await clearLoginViolations(subjectKeys);
   setCookie(res, 'admin_session', await createSession('sessions', 'admin_id', adminRow.id), 60 * 60 * 24 * 14);
   clearCookie(res, 'viewer_session');
   return redirect(res, '/admin');
@@ -501,11 +644,29 @@ app.get('/viewer/login', async (req, res) => {
 app.post('/viewer/login', async (req, res) => {
   const { username = '', password = '' } = req.body;
   const cleanUser = normalizeUsername(username);
-  if (!cleanUser || !isValidPassword(password)) return res.status(401).send(views.errorPage({ title: 'ログイン失敗', message: '認証に失敗しました。' }));
+  const subjectKeys = makeLoginSubjectKeys(req, 'viewer', cleanUser);
+  if (await isLoginBlocked(subjectKeys)) {
+    await delayAuthFailureResponse();
+    return res.status(429).send(views.errorPage({ title: 'ログイン制限', message: '短時間に試行が集中したため、少し時間を置いてから再度お試しください。' }));
+  }
+  if (!cleanUser || !isValidPassword(password)) {
+    await recordLoginFailure(subjectKeys, '形式不正');
+    await delayAuthFailureResponse();
+    return res.status(401).send(views.errorPage({ title: 'ログイン失敗', message: '認証に失敗しました。' }));
+  }
   const viewerRow = await get('SELECT * FROM box_viewers WHERE username = ?', [cleanUser]);
-  if (!viewerRow) return res.status(401).send(views.errorPage({ title: 'ログイン失敗', message: '認証に失敗しました。' }));
+  if (!viewerRow) {
+    await recordLoginFailure(subjectKeys, 'ユーザー不一致');
+    await delayAuthFailureResponse();
+    return res.status(401).send(views.errorPage({ title: 'ログイン失敗', message: '認証に失敗しました。' }));
+  }
   const attempted = hashPassword(password, viewerRow.password_salt).hash;
-  if (!safeCompare(attempted, viewerRow.password_hash)) return res.status(401).send(views.errorPage({ title: 'ログイン失敗', message: '認証に失敗しました。' }));
+  if (!safeCompare(attempted, viewerRow.password_hash)) {
+    await recordLoginFailure(subjectKeys, 'パスワード不一致');
+    await delayAuthFailureResponse();
+    return res.status(401).send(views.errorPage({ title: 'ログイン失敗', message: '認証に失敗しました。' }));
+  }
+  await clearLoginViolations(subjectKeys);
   setCookie(res, 'viewer_session', await createSession('viewer_sessions', 'viewer_id', viewerRow.id), 60 * 60 * 24 * 14);
   clearCookie(res, 'admin_session');
   return redirect(res, '/viewer');
@@ -768,10 +929,17 @@ app.post('/box/:slug/upload', (req, res, next) => {
 }, async (req, res) => {
   const actor = await resolveActor(req);
   const visitorKey = getOrCreateVisitorKey(req, res);
+  const uploadSubjectKey = `upload:${hashKey(`${visitorKey}:${getClientIp(req) || 'unknown-ip'}`)}`;
   const ban = await isBanned(visitorKey);
   if (ban) return res.status(403).send(views.errorPage({ actor, title: 'アップロード不可', message: `この端末からのアップロードは停止されています。理由: ${ban.reason}` }));
   const box = await get('SELECT * FROM boxes WHERE slug = ?', [req.params.slug]);
   if (!box || !box.is_active || isBoxExpired(box)) return res.status(404).send(views.errorPage({ actor, title: 'Not Found', message: '募集ボックスが存在しないか停止/期限切れです。' }));
+  const uploadLimitMessage = await enforceUploadRateLimit(uploadSubjectKey, box.id);
+  if (uploadLimitMessage) {
+    await recordViolation(visitorKey, '短時間多量アクセス');
+    return res.status(429).send(views.errorPage({ actor, title: 'アップロード待機', message: uploadLimitMessage }));
+  }
+  await recordUploadAttempt(uploadSubjectKey, box.id, false);
 
   const files = req.files || [];
   const uploaderName = (req.body.uploaderName || '').trim();
@@ -820,6 +988,7 @@ app.post('/box/:slug/upload', (req, res, next) => {
         [box.id, uploaderName || null, uploaderNote || null, file.originalname, path.basename(file.path), file.mimetype, file.size, getClientIp(req), nowIso()],
       );
     }
+    await recordUploadAttempt(uploadSubjectKey, box.id, true);
     await postDiscordNotification(box.discord_webhook_url, box.title, files, uploaderName);
     await sendUploadPush(box, files.length);
     return res.send(views.uploadDonePage({ actor, box, count: files.length }));
