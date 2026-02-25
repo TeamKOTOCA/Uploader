@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const webpush = require('web-push');
+const archiver = require('archiver');
 const views = require('./views');
 
 const app = express();
@@ -185,6 +186,14 @@ async function initDb() {
     subject_key TEXT NOT NULL,
     box_id INTEGER,
     was_success INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(box_id) REFERENCES boxes(id)
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS analytics_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,
+    box_id INTEGER,
+    actor_role TEXT NOT NULL,
     created_at TEXT NOT NULL,
     FOREIGN KEY(box_id) REFERENCES boxes(id)
   )`);
@@ -515,6 +524,21 @@ async function sendUploadPush(box, filesCount) {
   }));
 }
 
+async function trackEvent(eventType, actorRole = 'guest', boxId = null) {
+  await run(
+    'INSERT INTO analytics_events (event_type, box_id, actor_role, created_at) VALUES (?, ?, ?, ?)',
+    [eventType, boxId, actorRole, nowIso()],
+  );
+}
+
+function parseIds(input) {
+  const values = Array.isArray(input) ? input : [input];
+  return values
+    .flatMap((value) => String(value || '').split(','))
+    .map((value) => Number.parseInt(value, 10))
+    .filter((value) => Number.isInteger(value) && value > 0);
+}
+
 async function postDiscordNotification(webhookUrl, boxTitle, files, uploaderName = '') {
   if (!webhookUrl) return;
   const content = `📦 募集ボックス「${boxTitle}」に ${files.length} 件のファイルがアップロードされました\n送信者: ${uploaderName || '未入力'}\n${files.map((f) => `- ${f.originalname} (${Math.round(f.size / 1024)} KB)`).join('\n')}`;
@@ -561,6 +585,7 @@ app.get('/healthz', (_, res) => res.json({ ok: true, now: nowIso() }));
 
 app.get('/', async (req, res) => {
   const actor = await resolveActor(req);
+  await trackEvent('page_home', actor ? actor.role : 'guest');
   const boxes = (await all('SELECT title, slug, description, is_active, expires_at, header_image_path FROM boxes ORDER BY id DESC')).map((b) => ({ ...b, is_expired: isBoxExpired(b) }));
   return res.send(views.homePage({ actor, boxes }));
 });
@@ -711,7 +736,10 @@ app.get('/admin', requireAdmin(async (_, res, admin) => {
   const pushSettings = await all('SELECT box_id, is_enabled FROM notification_box_settings WHERE actor_type = ? AND actor_id = ?', ['admin', admin.id]);
   const pushMap = Object.fromEntries(pushSettings.map((r) => [String(r.box_id), r.is_enabled]));
   const banRows = await all('SELECT id, subject_key, reason, created_at, created_by FROM upload_bans WHERE released_at IS NULL ORDER BY id DESC');
-  return res.send(views.adminDashboardPage({ actor: admin, boxes, admins, viewers, pushMap, vapidEnabled: Boolean(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY), bans: banRows }));
+  const analyticsSummary = await all(`SELECT event_type, COUNT(*) AS total FROM analytics_events WHERE julianday(created_at) >= julianday('now', '-30 days') GROUP BY event_type ORDER BY total DESC`);
+  const uploadsByDay = await all(`SELECT strftime('%Y-%m-%d', created_at) AS day, COUNT(*) AS total FROM analytics_events WHERE event_type = 'upload_success' AND julianday(created_at) >= julianday('now', '-14 days') GROUP BY day ORDER BY day DESC`);
+  const boxPerformance = await all(`SELECT boxes.id, boxes.title, SUM(CASE WHEN analytics_events.event_type = 'page_box' THEN 1 ELSE 0 END) AS views, SUM(CASE WHEN analytics_events.event_type = 'upload_success' THEN 1 ELSE 0 END) AS uploads FROM boxes LEFT JOIN analytics_events ON analytics_events.box_id = boxes.id AND julianday(analytics_events.created_at) >= julianday('now', '-30 days') GROUP BY boxes.id ORDER BY uploads DESC, views DESC`);
+  return res.send(views.adminDashboardPage({ actor: admin, boxes, admins, viewers, pushMap, vapidEnabled: Boolean(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY), bans: banRows, analyticsSummary, uploadsByDay, boxPerformance }));
 }));
 
 app.post('/admin/viewers/create', requireAdmin(async (req, res, admin) => {
@@ -914,6 +942,7 @@ app.get('/box/:slug', async (req, res) => {
   if (ban) return res.status(403).send(views.errorPage({ actor, title: 'アップロード不可', message: `この端末からのアップロードは停止されています。理由: ${ban.reason}` }));
   const box = await get('SELECT * FROM boxes WHERE slug = ?', [req.params.slug]);
   if (!box || !box.is_active || isBoxExpired(box)) return res.status(404).send(views.errorPage({ actor, title: 'Not Found', message: '募集ボックスが存在しないか停止/期限切れです。' }));
+  await trackEvent('page_box', actor ? actor.role : 'guest', box.id);
   const currentCount = await get('SELECT COUNT(*) AS c FROM uploaded_files WHERE box_id = ?', [box.id]);
   return res.send(views.boxPublicPage({ actor, box, currentCount: currentCount.c }));
 });
@@ -989,6 +1018,7 @@ app.post('/box/:slug/upload', (req, res, next) => {
       );
     }
     await recordUploadAttempt(uploadSubjectKey, box.id, true);
+    await trackEvent('upload_success', actor ? actor.role : 'guest', box.id);
     await postDiscordNotification(box.discord_webhook_url, box.title, files, uploaderName);
     await sendUploadPush(box, files.length);
     return res.send(views.uploadDonePage({ actor, box, count: files.length }));
@@ -1022,6 +1052,69 @@ app.get('/admin/boxes/:id/files', async (req, res) => {
   const files = await all('SELECT id, uploader_name, uploader_note, original_name, stored_name, mime_type, size_bytes, uploader_ip, uploaded_at FROM uploaded_files WHERE box_id = ? ORDER BY id DESC', [box.id]);
   return res.send(views.filesPage({ actor, box, files }));
 });
+
+
+app.post('/files/bulk-download', async (req, res) => {
+  const actor = await resolveActor(req);
+  if (!actor) return redirect(res, '/admin/login');
+
+  const box = await get('SELECT id, title FROM boxes WHERE id = ?', [req.body.boxId]);
+  if (!box) return res.status(404).send(views.errorPage({ actor, message: '募集ボックスが見つかりません。' }));
+  if (actor.role === 'viewer' && !(await canViewerAccessBox(actor.id, box.id))) {
+    return res.status(403).send(views.errorPage({ actor, title: '権限エラー', message: 'この募集ボックスの閲覧権限がありません。' }));
+  }
+
+  const fileIds = parseIds(req.body.fileIds);
+  if (fileIds.length === 0) {
+    return res.status(400).send(views.errorPage({ actor, title: '入力エラー', message: 'ダウンロード対象を選択してください。' }));
+  }
+
+  const placeholders = fileIds.map(() => '?').join(',');
+  const files = await all(
+    `SELECT id, original_name, stored_name FROM uploaded_files WHERE box_id = ? AND id IN (${placeholders}) ORDER BY id DESC`,
+    [box.id, ...fileIds],
+  );
+  if (files.length === 0) {
+    return res.status(404).send(views.errorPage({ actor, title: 'Not Found', message: '対象ファイルが見つかりません。' }));
+  }
+
+  const safeTitle = uniqueSlug(box.title) || `box-${box.id}`;
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}-files.zip"`);
+  const archive = archiver('zip', { zlib: { level: 9 } });
+  archive.on('error', () => {
+    res.status(500).end();
+  });
+  archive.pipe(res);
+  for (const file of files) {
+    const fullPath = path.join(UPLOAD_DIR, path.basename(file.stored_name));
+    if (!fs.existsSync(fullPath)) continue;
+    archive.file(fullPath, { name: file.original_name });
+  }
+  archive.finalize();
+});
+
+app.post('/admin/files/bulk-delete', requireAdmin(async (req, res, admin) => {
+  const box = await get('SELECT id FROM boxes WHERE id = ?', [req.body.boxId]);
+  if (!box) return res.status(404).send(views.errorPage({ actor: admin, title: 'Not Found', message: '募集ボックスが見つかりません。' }));
+
+  const fileIds = parseIds(req.body.fileIds);
+  if (fileIds.length === 0) {
+    return res.status(400).send(views.errorPage({ actor: admin, title: '入力エラー', message: '削除対象を選択してください。' }));
+  }
+
+  const placeholders = fileIds.map(() => '?').join(',');
+  const files = await all(
+    `SELECT id, stored_name FROM uploaded_files WHERE box_id = ? AND id IN (${placeholders})`,
+    [box.id, ...fileIds],
+  );
+  for (const file of files) {
+    const fullPath = path.join(UPLOAD_DIR, path.basename(file.stored_name));
+    if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
+  }
+  await run(`DELETE FROM uploaded_files WHERE box_id = ? AND id IN (${placeholders})`, [box.id, ...fileIds]);
+  return redirect(res, `/admin/boxes/${box.id}/files`);
+}));
 
 app.get('/files/:id/download', async (req, res) => {
   const { actor, file, allowed } = await getAuthorizedFile(req, req.params.id);

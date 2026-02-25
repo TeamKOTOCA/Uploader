@@ -164,3 +164,32 @@ th { background: var(--surface-alt); }
 .tab-buttons { display: flex; flex-wrap: wrap; gap: .45rem; margin-bottom: .6rem; }
 .tab-buttons .btn.active { background: #111; color: #fff; }
 .tab-panel { display: none; }
+
+.upload-dropzone {
+  margin-top: .55rem;
+  border: 2px dashed var(--border);
+  border-radius: 2px;
+  padding: .8rem;
+  text-align: center;
+  background: #fff;
+  cursor: pointer;
+}
+.upload-dropzone.dragging {
+  background: var(--surface-alt);
+}
+.upload-progress-wrap {
+  margin: .55rem 0 .8rem;
+  display: flex;
+  gap: .5rem;
+  align-items: center;
+}
+.upload-progress-wrap progress {
+  width: 220px;
+}
+.bulk-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .45rem;
+  margin: .55rem 0;
+}
+.bulk-actions form { margin: 0; }
