@@ -24,6 +24,7 @@
 - 自動BAN（端末識別キー単位、管理画面で理由確認/解除）
 - Docker / LXC / Cloudflare Tunnel 運用対応
 - `/healthz` ヘルスチェック
+- 管理画面から環境全体（DB + uploads）のZIPバックアップ/復元
 
 ## 起動
 ```bash
