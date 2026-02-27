@@ -73,3 +73,10 @@ docker compose up -d --build
 - `upload_violations` に失敗イベントを記録し、短時間の失敗連続で `upload_bans` に自動登録します。
 - BAN対象はIPではなく `visitor_key` Cookie による端末識別キーです。
 - 管理画面の BAN管理タブから理由確認と解除が可能です。
+
+
+## 12. OGP
+- `src/views.js` の共通レイアウトで OGP / Twitter Card メタタグを出力します。
+- キャッチコピーは固定で `募集ボックスでファイルを送信`。
+- `OGP_IMAGE_PATH`（デフォルト `/assets/ogp.png`）を絶対URLまたは相対パスで指定可能。
+- 相対パスの場合は `SITE_URL` を先頭に付与してOGP画像URLを生成します。

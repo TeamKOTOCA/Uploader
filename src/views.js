@@ -17,6 +17,29 @@ function renderActorNav(actor) {
   return `<div class="nav-actions"><span>閲覧者: <strong>${escapeHtml(actor.username)}</strong></span><a class="btn secondary" href="/viewer">閲覧ダッシュボード</a><form class="inline-form" method="post" action="/viewer/logout"><button class="btn secondary" type="submit">ログアウト</button></form></div>`;
 }
 
+
+function buildOgpMeta(title) {
+  const siteName = 'Uploader';
+  const copy = '募集ボックスでファイルを送信';
+  const siteUrl = (process.env.SITE_URL || '').trim().replace(/\/$/, '');
+  const ogpImagePath = (process.env.OGP_IMAGE_PATH || '/assets/ogp.png').trim();
+  const ogImage = /^https?:\/\//i.test(ogpImagePath)
+    ? ogpImagePath
+    : `${siteUrl}${ogpImagePath.startsWith('/') ? '' : '/'}${ogpImagePath}`;
+  return [
+    `<meta property="og:type" content="website" />`,
+    `<meta property="og:site_name" content="${escapeHtml(siteName)}" />`,
+    `<meta property="og:title" content="${escapeHtml(title)}" />`,
+    `<meta property="og:description" content="${escapeHtml(copy)}" />`,
+    `<meta property="og:image" content="${escapeHtml(ogImage)}" />`,
+    `<meta name="twitter:card" content="summary_large_image" />`,
+    `<meta name="twitter:title" content="${escapeHtml(title)}" />`,
+    `<meta name="twitter:description" content="${escapeHtml(copy)}" />`,
+    `<meta name="twitter:image" content="${escapeHtml(ogImage)}" />`,
+    '<meta name="description" content="募集ボックスでファイルを送信" />',
+  ].join('\n');
+}
+
 function layout({ title, body, actor = null, extraHead = '' }) {
   return `<!doctype html>
 <html lang="ja">
@@ -25,6 +48,7 @@ function layout({ title, body, actor = null, extraHead = '' }) {
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>${escapeHtml(title)}</title>
 <link rel="stylesheet" href="/assets/styles.css" />
+${buildOgpMeta(title)}
 ${extraHead}
 </head>
 <body>
