@@ -22,7 +22,7 @@ function buildOgpMeta(title) {
   const siteName = 'Uploader';
   const copy = '募集ボックスでファイルを送信';
   const siteUrl = (process.env.SITE_URL || '').trim().replace(/\/$/, '');
-  const ogpImagePath = ('/assets/OGP.webp').trim();
+  const ogpImagePath = (process.env.OGP_IMAGE_PATH || '/assets/ogp.png').trim();
   const ogImage = /^https?:\/\//i.test(ogpImagePath)
     ? ogpImagePath
     : `${siteUrl}${ogpImagePath.startsWith('/') ? '' : '/'}${ogpImagePath}`;
