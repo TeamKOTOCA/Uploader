@@ -261,6 +261,7 @@ async function initDb() {
   await ensureColumn('boxes', 'require_uploader_note', 'INTEGER NOT NULL DEFAULT 0');
   await ensureColumn('boxes', 'success_redirect_url', 'TEXT');
   await ensureColumn('boxes', 'max_file_size_bytes', 'INTEGER');
+  await ensureColumn('boxes', 'is_private', 'INTEGER NOT NULL DEFAULT 0');
 
   await run('UPDATE boxes SET max_file_size_bytes = max_file_size_mb * 1024 * 1024 WHERE max_file_size_bytes IS NULL AND max_file_size_mb IS NOT NULL');
 }
@@ -432,7 +433,15 @@ function normalizeBoxInput(body) {
     accentColor: normalizeHexColor(body.accentColor),
     customCss: (body.customCss || '').trim().slice(0, 1500),
     successRedirectUrl: (body.successRedirectUrl || '').trim(),
+    isPrivate: body.isPrivate ? 1 : 0,
   };
+}
+
+async function canActorAccessPrivateBox(actor, boxId) {
+  if (!actor) return false;
+  if (actor.role === 'admin') return true;
+  if (actor.role === 'viewer') return canViewerAccessBox(actor.id, boxId);
+  return false;
 }
 
 function getBoxMaxSizeBytes(box) {
@@ -651,7 +660,7 @@ app.get('/healthz', (_, res) => res.json({ ok: true, now: nowIso() }));
 app.get('/', async (req, res) => {
   const actor = await resolveActor(req);
   await trackEvent('page_home', actor ? actor.role : 'guest');
-  const boxes = (await all('SELECT title, slug, description, is_active, expires_at, header_image_path FROM boxes ORDER BY id DESC')).map((b) => ({ ...b, is_expired: isBoxExpired(b) }));
+  const boxes = (await all('SELECT title, slug, description, is_active, expires_at, header_image_path FROM boxes WHERE is_private = 0 ORDER BY id DESC')).map((b) => ({ ...b, is_expired: isBoxExpired(b) }));
   return res.send(views.homePage({ actor, boxes }));
 });
 
@@ -939,8 +948,8 @@ function saveBoxHandler(mode) {
         if (input.boxPassword) ({ hash: passwordHash, salt: passwordSalt } = hashPassword(input.boxPassword));
 
         await run(
-          `INSERT INTO boxes (title, slug, description, allowed_extensions, max_file_size_mb, max_file_size_bytes, max_files_per_upload, password_hash, password_salt, discord_webhook_url, is_active, created_by_admin_id, created_at, header_image_path, public_notice, success_message, require_uploader_name, max_total_files, expires_at, font_family, accent_color, custom_css, require_uploader_note, success_redirect_url)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO boxes (title, slug, description, allowed_extensions, max_file_size_mb, max_file_size_bytes, max_files_per_upload, password_hash, password_salt, discord_webhook_url, is_active, created_by_admin_id, created_at, header_image_path, public_notice, success_message, require_uploader_name, max_total_files, expires_at, font_family, accent_color, custom_css, require_uploader_note, success_redirect_url, is_private)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             input.title,
             slug,
@@ -965,6 +974,7 @@ function saveBoxHandler(mode) {
             input.customCss,
             input.requireUploaderNote,
             input.successRedirectUrl,
+            input.isPrivate,
           ],
         );
         return redirect(res, '/admin');
@@ -992,7 +1002,7 @@ function saveBoxHandler(mode) {
       }
 
       await run(
-        `UPDATE boxes SET title = ?, description = ?, allowed_extensions = ?, max_file_size_mb = ?, max_file_size_bytes = ?, max_files_per_upload = ?, password_hash = ?, password_salt = ?, discord_webhook_url = ?, header_image_path = ?, public_notice = ?, success_message = ?, require_uploader_name = ?, max_total_files = ?, expires_at = ?, font_family = ?, accent_color = ?, custom_css = ?, require_uploader_note = ?, success_redirect_url = ? WHERE id = ?`,
+        `UPDATE boxes SET title = ?, description = ?, allowed_extensions = ?, max_file_size_mb = ?, max_file_size_bytes = ?, max_files_per_upload = ?, password_hash = ?, password_salt = ?, discord_webhook_url = ?, header_image_path = ?, public_notice = ?, success_message = ?, require_uploader_name = ?, max_total_files = ?, expires_at = ?, font_family = ?, accent_color = ?, custom_css = ?, require_uploader_note = ?, success_redirect_url = ?, is_private = ? WHERE id = ?`,
         [
           input.title,
           input.description,
@@ -1014,6 +1024,7 @@ function saveBoxHandler(mode) {
           input.customCss,
           input.requireUploaderNote,
           input.successRedirectUrl,
+          input.isPrivate,
           box.id,
         ],
       );
@@ -1039,6 +1050,30 @@ app.post('/admin/boxes/:id/toggle', requireAdmin(async (req, res, admin) => {
   return redirect(res, '/admin');
 }));
 
+app.post('/admin/boxes/:id/delete', requireAdmin(async (req, res, admin) => {
+  const box = await get('SELECT id, header_image_path FROM boxes WHERE id = ?', [req.params.id]);
+  if (!box) return res.status(404).send(views.errorPage({ actor: admin, title: 'Not Found', message: '募集ボックスが見つかりません。' }));
+
+  const files = await all('SELECT stored_name FROM uploaded_files WHERE box_id = ?', [box.id]);
+  for (const file of files) {
+    const fullPath = path.join(UPLOAD_DIR, path.basename(file.stored_name));
+    if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
+  }
+
+  if (box.header_image_path) {
+    const headerPath = path.join(HEADER_DIR, path.basename(box.header_image_path));
+    if (fs.existsSync(headerPath)) fs.unlinkSync(headerPath);
+  }
+
+  await run('DELETE FROM uploaded_files WHERE box_id = ?', [box.id]);
+  await run('DELETE FROM viewer_box_permissions WHERE box_id = ?', [box.id]);
+  await run('DELETE FROM notification_box_settings WHERE box_id = ?', [box.id]);
+  await run('DELETE FROM analytics_events WHERE box_id = ?', [box.id]);
+  await run('DELETE FROM upload_attempts WHERE box_id = ?', [box.id]);
+  await run('DELETE FROM boxes WHERE id = ?', [box.id]);
+  return redirect(res, '/admin');
+}));
+
 app.get('/box/:slug', async (req, res) => {
   const actor = await resolveActor(req);
   const visitorKey = getOrCreateVisitorKey(req, res);
@@ -1046,6 +1081,9 @@ app.get('/box/:slug', async (req, res) => {
   if (ban) return res.status(403).send(views.errorPage({ actor, title: 'アップロード不可', message: `この端末からのアップロードは停止されています。理由: ${ban.reason}` }));
   const box = await get('SELECT * FROM boxes WHERE slug = ?', [req.params.slug]);
   if (!box || !box.is_active || isBoxExpired(box)) return res.status(404).send(views.errorPage({ actor, title: 'Not Found', message: '募集ボックスが存在しないか停止/期限切れです。' }));
+  if (box.is_private && !(await canActorAccessPrivateBox(actor, box.id))) {
+    return res.status(403).send(views.errorPage({ actor, title: '権限エラー', message: 'この募集ボックスは非公開です。' }));
+  }
   await trackEvent('page_box', actor ? actor.role : 'guest', box.id);
   const currentCount = await get('SELECT COUNT(*) AS c FROM uploaded_files WHERE box_id = ?', [box.id]);
   return res.send(views.boxPublicPage({ actor, box, currentCount: currentCount.c }));
@@ -1067,6 +1105,9 @@ app.post('/box/:slug/upload', (req, res, next) => {
   if (ban) return res.status(403).send(views.errorPage({ actor, title: 'アップロード不可', message: `この端末からのアップロードは停止されています。理由: ${ban.reason}` }));
   const box = await get('SELECT * FROM boxes WHERE slug = ?', [req.params.slug]);
   if (!box || !box.is_active || isBoxExpired(box)) return res.status(404).send(views.errorPage({ actor, title: 'Not Found', message: '募集ボックスが存在しないか停止/期限切れです。' }));
+  if (box.is_private && !(await canActorAccessPrivateBox(actor, box.id))) {
+    return res.status(403).send(views.errorPage({ actor, title: '権限エラー', message: 'この募集ボックスは非公開です。' }));
+  }
   const uploadLimitMessage = await enforceUploadRateLimit(uploadSubjectKey, box.id);
   if (uploadLimitMessage) {
     await recordViolation(visitorKey, '短時間多量アクセス');
