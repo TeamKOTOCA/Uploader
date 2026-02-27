@@ -85,6 +85,27 @@ input:focus, textarea:focus, select:focus {
 }
 .btn:hover { background: var(--primary-strong); }
 .btn.secondary { background: #fff; }
+
+.btn.danger { border-color: var(--danger); color: var(--danger); }
+.btn.danger:hover { background: #ffeaea; }
+
+.upload-busy {
+  margin: .6rem 0;
+  border: 1px solid var(--border);
+  background: var(--surface-alt);
+  padding: .55rem .65rem;
+  font-weight: 700;
+}
+
+form.uploading .upload-dropzone {
+  opacity: .55;
+  pointer-events: none;
+}
+
+form.uploading progress {
+  height: 14px;
+}
+
 .inline-form { display: inline; margin: 0; }
 
 .notice-error, .notice-ok, .notice-info { border: 1px solid var(--border); padding: .5rem .65rem; border-radius: 2px; }

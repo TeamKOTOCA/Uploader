@@ -84,6 +84,8 @@
     const dropzone = document.getElementById('uploadDropzone');
     const progress = document.getElementById('uploadProgress');
     const progressText = document.getElementById('uploadProgressText');
+    const busyNotice = document.getElementById('uploadBusyNotice');
+    const submitButton = document.getElementById('uploadSubmitButton');
     if (!input || !list || !form) return;
 
     function renderFiles() {
@@ -126,14 +128,29 @@
     form.addEventListener('submit', (event) => {
       if (!progress || !progressText) return;
       event.preventDefault();
+      form.classList.add('uploading');
+      if (busyNotice) busyNotice.hidden = false;
+      if (submitButton) {
+        submitButton.disabled = true;
+        submitButton.textContent = 'アップロード中…';
+      }
+      progressText.textContent = 'アップロードを開始しています…';
       const xhr = new XMLHttpRequest();
       xhr.open('POST', form.action);
       xhr.upload.addEventListener('progress', (e) => {
         if (!e.lengthComputable) return;
         const ratio = Math.min(100, Math.round((e.loaded / e.total) * 100));
         progress.value = ratio;
-        progressText.textContent = `${ratio}%`;
+        progressText.textContent = `アップロード中 ${ratio}%`;
       });
+      const finalizeFail = () => {
+        form.classList.remove('uploading');
+        if (busyNotice) busyNotice.hidden = true;
+        if (submitButton) {
+          submitButton.disabled = false;
+          submitButton.textContent = 'アップロード';
+        }
+      };
       xhr.addEventListener('load', () => {
         if (xhr.responseText && String(xhr.responseText).includes('<!doctype html>')) {
           document.open();
@@ -147,9 +164,13 @@
           document.close();
           return;
         }
+        finalizeFail();
         showToast('アップロードに失敗しました');
       });
-      xhr.addEventListener('error', () => showToast('アップロードに失敗しました'));
+      xhr.addEventListener('error', () => {
+        finalizeFail();
+        showToast('アップロードに失敗しました');
+      });
       xhr.send(new FormData(form));
     });
 
@@ -227,6 +248,15 @@
 
   const enablePushBtn = document.getElementById('enablePushBtn');
   if (enablePushBtn) enablePushBtn.addEventListener('click', () => enablePush().catch(() => showToast('Push設定に失敗しました')));
+
+  const autoPushPromptRoot = document.querySelector('[data-auto-push-prompt="1"]');
+  if (autoPushPromptRoot && enablePushBtn && Notification.permission === 'default') {
+    setTimeout(() => {
+      if (window.confirm('このアカウントでPush通知を有効化しますか？')) {
+        enablePush().catch(() => showToast('Push設定に失敗しました'));
+      }
+    }, 250);
+  }
 
   document.querySelectorAll('.js-copy').forEach((button) => {
     button.addEventListener('click', async () => {

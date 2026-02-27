@@ -664,6 +664,12 @@ app.get('/', async (req, res) => {
   return res.send(views.homePage({ actor, boxes }));
 });
 
+app.get('/login', async (req, res) => {
+  const actor = await resolveActor(req);
+  if (actor) return redirect(res, actor.role === 'admin' ? '/admin' : '/viewer');
+  return res.send(views.loginChoicePage({ actor: null }));
+});
+
 app.get('/admin/register', async (req, res) => {
   const actor = await resolveActor(req);
   const count = await get('SELECT COUNT(*) AS c FROM admins');
@@ -734,6 +740,28 @@ app.post('/admin/logout', requireAdmin(async (_, res, admin) => {
   return redirect(res, '/');
 }));
 
+app.get('/admin/account', requireAdmin(async (req, res, admin) => {
+  await trackEvent('page_admin_account', admin.role);
+  return res.send(views.accountPage({ actor: admin }));
+}));
+
+app.post('/admin/account/password', requireAdmin(async (req, res, admin) => {
+  const { currentPassword = '', newPassword = '' } = req.body;
+  if (!isValidPassword(currentPassword) || !isValidPassword(newPassword)) {
+    return res.status(400).send(views.errorPage({ actor: admin, message: 'パスワード形式が不正です。' }));
+  }
+  const row = await get('SELECT password_hash, password_salt FROM admins WHERE id = ?', [admin.id]);
+  if (!row) return res.status(404).send(views.errorPage({ actor: admin, message: 'アカウントが見つかりません。' }));
+  const attempted = hashPassword(currentPassword, row.password_salt).hash;
+  if (!safeCompare(attempted, row.password_hash)) {
+    return res.status(401).send(views.errorPage({ actor: admin, message: '現在のパスワードが一致しません。' }));
+  }
+  const next = hashPassword(newPassword);
+  await run('UPDATE admins SET password_hash = ?, password_salt = ? WHERE id = ?', [next.hash, next.salt, admin.id]);
+  await run('DELETE FROM sessions WHERE admin_id = ? AND token_hash != ?', [admin.id, crypto.createHash('sha256').update(parseCookies(req).admin_session || '').digest('hex')]);
+  return redirect(res, '/admin/account');
+}));
+
 app.post('/admin/admins/create', requireAdmin(async (req, res, admin) => {
   const { username = '', password = '' } = req.body;
   const cleanUser = normalizeUsername(username);
@@ -791,6 +819,32 @@ app.post('/viewer/logout', async (req, res) => {
   if (viewer) await run('DELETE FROM viewer_sessions WHERE viewer_id = ?', [viewer.id]);
   clearCookie(res, 'viewer_session');
   return redirect(res, '/');
+});
+
+app.get('/viewer/account', async (req, res) => {
+  const viewer = await getViewerFromRequest(req);
+  if (!viewer) return redirect(res, '/viewer/login');
+  await trackEvent('page_viewer_account', viewer.role);
+  return res.send(views.accountPage({ actor: viewer }));
+});
+
+app.post('/viewer/account/password', async (req, res) => {
+  const viewer = await getViewerFromRequest(req);
+  if (!viewer) return redirect(res, '/viewer/login');
+  const { currentPassword = '', newPassword = '' } = req.body;
+  if (!isValidPassword(currentPassword) || !isValidPassword(newPassword)) {
+    return res.status(400).send(views.errorPage({ actor: viewer, message: 'パスワード形式が不正です。' }));
+  }
+  const row = await get('SELECT password_hash, password_salt FROM box_viewers WHERE id = ?', [viewer.id]);
+  if (!row) return res.status(404).send(views.errorPage({ actor: viewer, message: 'アカウントが見つかりません。' }));
+  const attempted = hashPassword(currentPassword, row.password_salt).hash;
+  if (!safeCompare(attempted, row.password_hash)) {
+    return res.status(401).send(views.errorPage({ actor: viewer, message: '現在のパスワードが一致しません。' }));
+  }
+  const next = hashPassword(newPassword);
+  await run('UPDATE box_viewers SET password_hash = ?, password_salt = ? WHERE id = ?', [next.hash, next.salt, viewer.id]);
+  await run('DELETE FROM viewer_sessions WHERE viewer_id = ? AND token_hash != ?', [viewer.id, crypto.createHash('sha256').update(parseCookies(req).viewer_session || '').digest('hex')]);
+  return redirect(res, '/viewer/account');
 });
 
 app.get('/viewer', async (req, res) => {
@@ -857,6 +911,17 @@ app.post('/admin/viewers/:id/assign', requireAdmin(async (req, res, admin) => {
   const box = await get('SELECT id FROM boxes WHERE id = ?', [req.body.boxId]);
   if (!viewer || !box) return res.status(400).send(views.errorPage({ actor: admin, message: '閲覧権限の付与対象が不正です。' }));
   await run('INSERT OR IGNORE INTO viewer_box_permissions (viewer_id, box_id, created_at) VALUES (?, ?, ?)', [viewer.id, box.id, nowIso()]);
+  return redirect(res, '/admin');
+}));
+
+app.post('/admin/viewers/:id/delete', requireAdmin(async (req, res, admin) => {
+  const viewer = await get('SELECT id FROM box_viewers WHERE id = ?', [req.params.id]);
+  if (!viewer) return res.status(404).send(views.errorPage({ actor: admin, message: '閲覧アカウントが見つかりません。' }));
+  await run('DELETE FROM viewer_sessions WHERE viewer_id = ?', [viewer.id]);
+  await run('DELETE FROM viewer_box_permissions WHERE viewer_id = ?', [viewer.id]);
+  await run('DELETE FROM notification_subscriptions WHERE actor_type = ? AND actor_id = ?', ['viewer', viewer.id]);
+  await run('DELETE FROM notification_box_settings WHERE actor_type = ? AND actor_id = ?', ['viewer', viewer.id]);
+  await run('DELETE FROM box_viewers WHERE id = ?', [viewer.id]);
   return redirect(res, '/admin');
 }));
 
