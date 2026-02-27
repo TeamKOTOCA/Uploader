@@ -4,6 +4,8 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const os = require('os');
+const { spawn } = require('child_process');
 const webpush = require('web-push');
 const archiver = require('archiver');
 const views = require('./views');
@@ -14,6 +16,7 @@ const DATA_DIR = path.join(__dirname, '..', 'data');
 const UPLOAD_DIR = path.join(DATA_DIR, '..', 'uploads');
 const HEADER_DIR = path.join(UPLOAD_DIR, 'headers');
 const DB_PATH = path.join(DATA_DIR, 'uploader.db');
+const ENV_BACKUP_ROOT = 'uploader-environment';
 let vapidPublicKey = process.env.VAPID_PUBLIC_KEY || '';
 let vapidPrivateKey = process.env.VAPID_PRIVATE_KEY || '';
 let vapidSubject = process.env.VAPID_SUBJECT || 'mailto:admin@example.com';
@@ -37,7 +40,24 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 fs.mkdirSync(HEADER_DIR, { recursive: true });
 
-const db = new sqlite3.Database(DB_PATH);
+let db;
+
+function openDb() {
+  db = new sqlite3.Database(DB_PATH);
+}
+
+function closeDb() {
+  if (!db) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    db.close((err) => {
+      if (err) return reject(err);
+      db = null;
+      return resolve();
+    });
+  });
+}
+
+openDb();
 
 
 async function getSetting(key) {
@@ -99,6 +119,27 @@ function all(sql, params = []) {
   return new Promise((resolve, reject) => {
     db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows)));
   });
+}
+
+function runUnzip(filePath, destDir) {
+  return new Promise((resolve, reject) => {
+    const unzip = spawn('unzip', ['-o', filePath, '-d', destDir]);
+    let stderr = '';
+    unzip.stderr.on('data', (chunk) => {
+      stderr += String(chunk || '');
+    });
+    unzip.on('error', reject);
+    unzip.on('close', (code) => {
+      if (code === 0) return resolve();
+      return reject(new Error(stderr.trim() || `unzip failed with code ${code}`));
+    });
+  });
+}
+
+async function replaceDir(fromPath, toPath) {
+  await fs.promises.rm(toPath, { recursive: true, force: true });
+  await fs.promises.mkdir(path.dirname(toPath), { recursive: true });
+  await fs.promises.cp(fromPath, toPath, { recursive: true });
 }
 
 async function ensureColumn(table, column, definition) {
@@ -655,6 +696,19 @@ const headerUpload = multer({
   },
 });
 
+const restoreUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_, __, cb) => cb(null, os.tmpdir()),
+    filename: (_, __, cb) => cb(null, `uploader-restore-${Date.now()}-${crypto.randomBytes(6).toString('hex')}.zip`),
+  }),
+  limits: { fileSize: 1024 * 1024 * 1024 },
+  fileFilter: (_, file, cb) => {
+    const ext = path.extname(file.originalname || '').toLowerCase();
+    if (ext === '.zip') return cb(null, true);
+    return cb(new Error('復元ファイルは zip のみ対応です。'));
+  },
+});
+
 app.get('/healthz', (_, res) => res.json({ ok: true, now: nowIso() }));
 
 app.get('/', async (req, res) => {
@@ -884,6 +938,82 @@ app.get('/admin', requireAdmin(async (_, res, admin) => {
   const boxPerformance = await all(`SELECT boxes.id, boxes.title, SUM(CASE WHEN analytics_events.event_type = 'page_box' THEN 1 ELSE 0 END) AS views, SUM(CASE WHEN analytics_events.event_type = 'upload_success' THEN 1 ELSE 0 END) AS uploads FROM boxes LEFT JOIN analytics_events ON analytics_events.box_id = boxes.id AND julianday(analytics_events.created_at) >= julianday('now', '-30 days') GROUP BY boxes.id ORDER BY uploads DESC, views DESC`);
   const vapidConfig = { publicKey: vapidPublicKey, privateKey: vapidPrivateKey, subject: vapidSubject };
   return res.send(views.adminDashboardPage({ actor: admin, boxes, admins, viewers, pushMap, vapidEnabled: hasPushConfig(), vapidConfig, bans: banRows, analyticsSummary, uploadsByDay, boxPerformance }));
+}));
+
+
+app.get('/admin/environment/download', requireAdmin(async (_req, res, admin) => {
+  await trackEvent('download_environment_backup', admin.role);
+  const stamp = nowIso().replace(/[:.]/g, '-');
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="uploader-environment-${stamp}.zip"`);
+  const archive = archiver('zip', { zlib: { level: 9 } });
+  archive.on('error', () => {
+    if (!res.headersSent) {
+      res.status(500).send(views.errorPage({ actor: admin, title: 'バックアップ失敗', message: '環境バックアップZIPの生成に失敗しました。' }));
+    }
+  });
+  archive.pipe(res);
+  archive.directory(DATA_DIR, `${ENV_BACKUP_ROOT}/data`);
+  archive.directory(UPLOAD_DIR, `${ENV_BACKUP_ROOT}/uploads`);
+  archive.append(JSON.stringify({ createdAt: nowIso(), app: 'uploader' }, null, 2), { name: `${ENV_BACKUP_ROOT}/metadata.json` });
+  archive.finalize();
+}));
+
+app.post('/admin/environment/restore', requireAdmin(async (req, res, admin) => {
+  restoreUpload.single('backupZip')(req, res, async (err) => {
+    if (err instanceof multer.MulterError) {
+      return res.status(400).send(views.errorPage({ actor: admin, title: '復元失敗', message: `復元ファイルの処理エラー: ${err.message}` }));
+    }
+    if (err) {
+      return res.status(400).send(views.errorPage({ actor: admin, title: '復元失敗', message: err.message || '復元ファイルのアップロードに失敗しました。' }));
+    }
+
+    const uploadedPath = req.file ? req.file.path : '';
+    const extractDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'uploader-restore-'));
+
+    try {
+      if (!uploadedPath) {
+        return res.status(400).send(views.errorPage({ actor: admin, title: '復元失敗', message: '復元対象のZIPファイルを選択してください。' }));
+      }
+
+      await runUnzip(uploadedPath, extractDir);
+
+      const extractedRoot = path.join(extractDir, ENV_BACKUP_ROOT);
+      const dataSource = path.join(extractedRoot, 'data');
+      const uploadsSource = path.join(extractedRoot, 'uploads');
+      const restoredDbPath = path.join(dataSource, path.basename(DB_PATH));
+
+      if (!fs.existsSync(restoredDbPath) || !fs.existsSync(uploadsSource)) {
+        return res.status(400).send(views.errorPage({ actor: admin, title: '復元失敗', message: 'ZIP構成が不正です。環境バックアップZIPを指定してください。' }));
+      }
+
+      await closeDb();
+      await replaceDir(dataSource, DATA_DIR);
+      await replaceDir(uploadsSource, UPLOAD_DIR);
+      await fs.promises.mkdir(HEADER_DIR, { recursive: true });
+      openDb();
+      await initDb();
+      await loadPushConfig();
+      await trackEvent('restore_environment_backup', admin.role);
+      return redirect(res, '/admin');
+    } catch (restoreError) {
+      if (!db) {
+        try {
+          openDb();
+          await initDb();
+          await loadPushConfig();
+        } catch (_) {
+          // noop
+        }
+      }
+      return res.status(500).send(views.errorPage({ actor: admin, title: '復元失敗', message: `環境復元に失敗しました: ${restoreError.message}` }));
+    } finally {
+      if (uploadedPath) {
+        await fs.promises.rm(uploadedPath, { force: true }).catch(() => {});
+      }
+      await fs.promises.rm(extractDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
 }));
 
 app.post('/admin/viewers/create', requireAdmin(async (req, res, admin) => {
