@@ -64,6 +64,18 @@ async function loadPushConfig() {
   configureWebPush();
 }
 
+async function ensureVapidConfig() {
+  if (vapidPublicKey && vapidPrivateKey) return;
+  const generated = webpush.generateVAPIDKeys();
+  vapidPublicKey = generated.publicKey;
+  vapidPrivateKey = generated.privateKey;
+  if (!vapidSubject) vapidSubject = 'mailto:admin@example.com';
+  await setSetting('vapid_public_key', vapidPublicKey);
+  await setSetting('vapid_private_key', vapidPrivateKey);
+  await setSetting('vapid_subject', vapidSubject);
+  configureWebPush();
+}
+
 function hasPushConfig() {
   return Boolean(vapidPublicKey && vapidPrivateKey);
 }
@@ -656,9 +668,9 @@ app.post('/admin/register', async (req, res) => {
   const { username = '', password = '' } = req.body;
   const cleanUser = normalizeUsername(username);
   if (!isValidUsername(cleanUser) || !isValidPassword(password)) return res.status(400).send(views.errorPage({ message: 'ユーザー名またはパスワードの形式が不正です。' }));
-  const count = await get('SELECT COUNT(*) AS c FROM admins');
   const actor = await resolveActor(req);
-  if (count.c > 0) return res.status(403).send(views.errorPage({ message: '管理者アカウントは追加できません。', actor }));
+  const count = await get('SELECT COUNT(*) AS c FROM admins');
+  if (count.c > 0) return res.status(403).send(views.errorPage({ message: '初回登録は完了しています。管理画面から管理者アカウントを追加してください。', actor }));
   const { salt, hash } = hashPassword(password);
   try {
     const result = await run('INSERT INTO admins (username, password_hash, password_salt, created_at) VALUES (?, ?, ?, ?)', [cleanUser, hash, salt, nowIso()]);
@@ -711,6 +723,21 @@ app.post('/admin/logout', requireAdmin(async (_, res, admin) => {
   await run('DELETE FROM sessions WHERE admin_id = ?', [admin.id]);
   clearCookie(res, 'admin_session');
   return redirect(res, '/');
+}));
+
+app.post('/admin/admins/create', requireAdmin(async (req, res, admin) => {
+  const { username = '', password = '' } = req.body;
+  const cleanUser = normalizeUsername(username);
+  if (!isValidUsername(cleanUser) || !isValidPassword(password)) {
+    return res.status(400).send(views.errorPage({ actor: admin, message: '管理者アカウント作成の入力値が不正です。' }));
+  }
+  const { salt, hash } = hashPassword(password);
+  try {
+    await run('INSERT INTO admins (username, password_hash, password_salt, created_at) VALUES (?, ?, ?, ?)', [cleanUser, hash, salt, nowIso()]);
+    return redirect(res, '/admin');
+  } catch (_) {
+    return res.status(400).send(views.errorPage({ actor: admin, message: '同名の管理者アカウントが存在します。' }));
+  }
 }));
 
 app.get('/viewer/login', async (req, res) => {
@@ -1249,6 +1276,7 @@ app.use(async (err, req, res, _next) => {
 
 initDb().then(async () => {
   await loadPushConfig();
+  await ensureVapidConfig();
   const adminCount = await get('SELECT COUNT(*) AS c FROM admins');
   app.listen(PORT, () => {
     console.log(`Uploader started on http://0.0.0.0:${PORT}`);
