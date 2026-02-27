@@ -59,5 +59,13 @@ docker compose --profile cloudflare up -d --build
 
 
 ## Push通知の有効化
-- 環境変数 `VAPID_PUBLIC_KEY` と `VAPID_PRIVATE_KEY` を設定してください。
+- VAPID鍵は初回起動時に自動生成されます（管理画面で後から変更可能）。
+- `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` を環境変数で指定した場合は、その値が優先されます。
 - ログイン後の管理画面/閲覧画面で「このブラウザでPush通知を有効化」を押し、各ボックスで Push ON にすると通知対象になります。
+
+
+## OGP設定
+- OGPのキャッチコピーは `募集ボックスでファイルを送信` です。
+- OGP画像は `OGP_IMAGE_PATH` で指定できます（デフォルト: `/assets/ogp.png`）。
+- 絶対URLの画像を使う場合は `OGP_IMAGE_PATH=https://...` を指定してください。
+- 相対パス指定時の絶対URL化には `SITE_URL` を使用します（例: `https://uploader.example.com`）。
