@@ -181,6 +181,7 @@ function boxFormFields(box = {}) {
     <label>受付期限（任意）<input type="datetime-local" name="expiresAt" value="${expiresValue}" /></label>
     <label><input type="checkbox" name="requireUploaderName" value="1" ${box.require_uploader_name ? 'checked' : ''} /> 送信者名を必須にする</label>
     <label><input type="checkbox" name="requireUploaderNote" value="1" ${box.require_uploader_note ? 'checked' : ''} /> メモ入力を必須にする</label>
+    <label><input type="checkbox" name="isPrivate" value="1" ${box.is_private ? 'checked' : ''} /> 非公開ボックス（トップページに表示しない / 権限ユーザーのみアクセス可）</label>
     <label>送信完了後URL（任意）<input name="successRedirectUrl" maxlength="500" value="${escapeHtml(box.success_redirect_url || '')}" placeholder="https://example.com/thanks" /></label>
     <label>ボックスパスワード（変更時のみ入力）<input type="password" name="boxPassword" maxlength="128" /></label>
     <label>Discord Webhook URL（任意）<input name="discordWebhookUrl" maxlength="500" value="${escapeHtml(box.discord_webhook_url || '')}" /></label>
@@ -193,13 +194,14 @@ function adminDashboardPage({ actor, boxes, admins, viewers, pushMap = {}, vapid
       <td>${box.id}</td><td>${escapeHtml(box.title)}</td><td><a href="/box/${escapeHtml(box.slug)}">${escapeHtml(box.slug)}</a></td>
       <td>${escapeHtml(box.allowed_extensions || 'すべて許可')}</td>
       <td>${formatFileSize(box.max_file_size_bytes || ((box.max_file_size_mb || 0) * 1024 * 1024))} / ${box.max_files_per_upload}件 / 総数${box.max_total_files || '無制限'}</td>
-      <td>${box.is_active ? '公開' : '停止'}</td>
+      <td>${box.is_active ? (box.is_private ? '非公開' : '公開') : '停止'}</td>
       <td>
         <form class="inline-form" method="post" action="/push/boxes/${box.id}/toggle"><button class="btn secondary" type="submit">${pushMap[String(box.id)] ? 'Push ON' : 'Push OFF'}</button></form>
         <button class="btn secondary js-copy" type="button" data-copy="/box/${escapeHtml(box.slug)}">リンクコピー</button>
         <form class="inline-form" method="post" action="/admin/boxes/${box.id}/toggle"><button class="btn secondary" type="submit">${box.is_active ? '停止' : '再開'}</button></form>
         <a class="btn secondary" href="/admin/boxes/${box.id}/files">ファイル</a>
         <a class="btn secondary" href="/admin/boxes/${box.id}/edit">編集</a>
+        <form class="inline-form" method="post" action="/admin/boxes/${box.id}/delete" onsubmit="return confirm('このボックスとアップロード済みファイルを削除します。よろしいですか？');"><button class="btn secondary" type="submit">削除</button></form>
       </td>
     </tr>
   `).join('');
@@ -232,7 +234,7 @@ function adminDashboardPage({ actor, boxes, admins, viewers, pushMap = {}, vapid
 }
 
 function adminBoxEditPage({ actor, box }) {
-  return layout({ title: `ボックス編集: ${box.title}`, actor, body: `<section class="card"><h2>募集ボックス編集</h2>${box.header_image_path ? `<img class="box-header" src="/box-assets/${encodeURIComponent(box.header_image_path)}" alt="header" />` : ''}<form method="post" action="/admin/boxes/${box.id}/edit" enctype="multipart/form-data">${boxFormFields(box)}<button class="btn" type="submit">更新</button></form></section>` });
+  return layout({ title: `ボックス編集: ${box.title}`, actor, body: `<section class="card"><h2>募集ボックス編集</h2>${box.header_image_path ? `<img class="box-header" src="/box-assets/${encodeURIComponent(box.header_image_path)}" alt="header" />` : ''}<form method="post" action="/admin/boxes/${box.id}/edit" enctype="multipart/form-data">${boxFormFields(box)}<button class="btn" type="submit">更新</button></form><form method="post" action="/admin/boxes/${box.id}/delete" onsubmit="return confirm('このボックスとアップロード済みファイルを削除します。よろしいですか？');"><button class="btn secondary" type="submit">このボックスを削除</button></form></section>` });
 }
 
 function viewerDashboardPage({ actor, boxes, pushMap = {}, vapidEnabled = false }) {
