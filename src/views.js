@@ -9,7 +9,7 @@ function escapeHtml(value = '') {
 
 function renderActorNav(actor) {
   if (!actor) {
-    return '<div class="nav-actions"><a class="btn secondary" href="/admin/login">管理者ログイン</a><a class="btn secondary" href="/viewer/login">閲覧アカウントログイン</a></div>';
+    return '<div class="nav-actions"><a class="btn secondary" href="/login">ログイン</a></div>';
   }
   if (actor.role === 'admin') {
     return `<div class="nav-actions"><span>管理者: <strong>${escapeHtml(actor.username)}</strong></span><a class="btn secondary" href="/admin">管理画面</a><form class="inline-form" method="post" action="/admin/logout"><button class="btn secondary" type="submit">ログアウト</button></form></div>`;
@@ -86,6 +86,14 @@ function adminRegisterPage({ actor }) {
 
 function adminLoginPage({ actor }) {
   return layout({ title: '管理者ログイン', actor, body: `<section class="card"><h2>管理者ログイン</h2><form method="post" action="/admin/login"><label>ユーザー名<input name="username" required minlength="3" maxlength="64" pattern="[a-zA-Z0-9_.-]{3,64}" /></label><label>パスワード<input type="password" name="password" required minlength="8" maxlength="128" /></label><button class="btn" type="submit">ログイン</button></form></section>` });
+}
+
+function loginChoicePage({ actor }) {
+  return layout({
+    title: 'ログイン',
+    actor,
+    body: `<section class="card"><h2>ログイン</h2><p class="muted">利用するアカウント種別を選択してください。</p><div class="grid two"><a class="btn" href="/admin/login">管理者としてログイン</a><a class="btn" href="/viewer/login">閲覧アカウントでログイン</a></div></section>`,
+  });
 }
 
 function viewerLoginPage({ actor }) {
@@ -207,25 +215,26 @@ function adminDashboardPage({ actor, boxes, admins, viewers, pushMap = {}, vapid
   `).join('');
 
   const adminRows = admins.map((a) => `<tr><td>${a.id}</td><td>${escapeHtml(a.username)}</td><td>${escapeHtml(a.created_at)}</td></tr>`).join('');
-  const viewerRows = viewers.map((v) => `<tr><td>${v.id}</td><td>${escapeHtml(v.username)}</td><td>${escapeHtml(v.allowed_boxes || '(未割当)')}</td><td>${escapeHtml(v.created_at)}</td><td><form method="post" action="/admin/viewers/${v.id}/assign"><div class="assign-row"><input type="number" name="boxId" min="1" required placeholder="box id"/><button class="btn secondary" type="submit">割当</button></div></form></td></tr>`).join('');
+  const viewerRows = viewers.map((v) => `<tr><td>${v.id}</td><td>${escapeHtml(v.username)}</td><td>${escapeHtml(v.allowed_boxes || '(未割当)')}</td><td>${escapeHtml(v.created_at)}</td><td><form method="post" action="/admin/viewers/${v.id}/assign"><div class="assign-row"><input type="number" name="boxId" min="1" required placeholder="box id"/><button class="btn secondary" type="submit">割当</button></div></form><form method="post" action="/admin/viewers/${v.id}/delete" onsubmit="return confirm('閲覧アカウントを削除します。よろしいですか？');"><button class="btn secondary danger" type="submit">削除</button></form></td></tr>`).join('');
   const banRows = bans.map((b) => `<tr><td>${b.id}</td><td>${escapeHtml(b.subject_key)}</td><td>${escapeHtml(b.reason)}</td><td>${escapeHtml(b.created_by)}</td><td>${escapeHtml(b.created_at)}</td><td><form method="post" action="/admin/bans/${b.id}/release"><button class="btn secondary" type="submit">解除</button></form></td></tr>`).join('');
 
   return layout({
     title: '管理画面',
     actor,
     body: `
-      <section class="grid two"><div class="card"><h2>通知設定</h2>${vapidEnabled ? '<button type="button" class="btn" id="enablePushBtn">このブラウザでPush通知を有効化</button><p class="muted">有効化後、各ボックスの Push ON/OFF を切り替えできます。</p>' : '<p class="notice-info">Push通知は未設定です。下のVAPID設定を保存してください。</p>'}</div><div class="card"><h2>VAPID Key設定</h2><form method="post" action="/admin/push-config"><label>VAPID Subject<input name="vapidSubject" maxlength="300" placeholder="mailto:admin@example.com" value="${escapeHtml(vapidConfig.subject || 'mailto:admin@example.com')}" /></label><label>VAPID Public Key<input name="vapidPublicKey" maxlength="300" value="${escapeHtml(vapidConfig.publicKey || '')}" /></label><label>VAPID Private Key<input name="vapidPrivateKey" maxlength="300" value="${escapeHtml(vapidConfig.privateKey || '')}" /></label><p class="muted">無効化したい場合は公開鍵・秘密鍵を両方空欄にして保存してください。</p><button class="btn" type="submit">VAPID設定を保存</button></form></div></section>
       <section class="tabs" data-tabs>
         <div class="tab-buttons">
           <button class="btn secondary" type="button" data-tab-target="tab-boxes">募集ボックス</button>
           <button class="btn secondary" type="button" data-tab-target="tab-create">作成</button>
           <button class="btn secondary" type="button" data-tab-target="tab-accounts">アカウント</button>
+          <button class="btn secondary" type="button" data-tab-target="tab-push">通知設定</button>
           <button class="btn secondary" type="button" data-tab-target="tab-analytics">アクセス解析</button>
           <button class="btn secondary" type="button" data-tab-target="tab-ban">BAN管理</button>
         </div>
         <div class="tab-panel" data-tab-panel="tab-boxes"><section class="card"><h2>募集ボックス一覧</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>タイトル</th><th>リンク</th><th>許可形式</th><th>制限</th><th>状態</th><th>操作</th></tr></thead><tbody>${boxRows || '<tr><td colspan="7">まだありません</td></tr>'}</tbody></table></div></section></div>
         <div class="tab-panel" data-tab-panel="tab-create"><section class="grid two"><div class="card"><h2>募集ボックス作成</h2><form method="post" action="/admin/boxes/create" enctype="multipart/form-data">${boxFormFields()}<button class="btn" type="submit">作成</button></form></div></section></div>
-        <div class="tab-panel" data-tab-panel="tab-accounts"><section class="grid two"><div class="card"><h2>アカウント作成</h2><h3>管理者アカウント追加</h3><form method="post" action="/admin/admins/create"><label>ユーザー名<input name="username" required minlength="3" maxlength="64" pattern="[a-zA-Z0-9_.-]{3,64}" /></label><label>パスワード<input type="password" name="password" required minlength="8" maxlength="128" /></label><button class="btn" type="submit">管理者アカウント追加</button></form><h3>閲覧アカウント追加</h3><form method="post" action="/admin/viewers/create"><label>ユーザー名<input name="username" required minlength="3" maxlength="64" pattern="[a-zA-Z0-9_.-]{3,64}" /></label><label>パスワード<input type="password" name="password" required minlength="8" maxlength="128" /></label><label>初期割当ボックスID<input type="number" name="boxId" min="1" required /></label><button class="btn" type="submit">閲覧アカウント追加</button></form></div><div class="card"><h2>閲覧アカウント一覧</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>ユーザー名</th><th>閲覧可能ボックス</th><th>作成日時</th><th>追加割当</th></tr></thead><tbody>${viewerRows || '<tr><td colspan="5">まだありません</td></tr>'}</tbody></table></div></div></section><section class="card"><h2>管理者一覧</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>ユーザー名</th><th>作成日時</th></tr></thead><tbody>${adminRows}</tbody></table></div></section></div>
+        <div class="tab-panel" data-tab-panel="tab-accounts"><section class="grid two"><div class="card"><h2>アカウント作成</h2><h3>管理者アカウント追加</h3><form method="post" action="/admin/admins/create"><label>ユーザー名<input name="username" required minlength="3" maxlength="64" pattern="[a-zA-Z0-9_.-]{3,64}" /></label><label>パスワード<input type="password" name="password" required minlength="8" maxlength="128" /></label><button class="btn" type="submit">管理者アカウント追加</button></form><h3>閲覧アカウント追加</h3><form method="post" action="/admin/viewers/create"><label>ユーザー名<input name="username" required minlength="3" maxlength="64" pattern="[a-zA-Z0-9_.-]{3,64}" /></label><label>パスワード<input type="password" name="password" required minlength="8" maxlength="128" /></label><label>初期割当ボックスID<input type="number" name="boxId" min="1" required /></label><button class="btn" type="submit">閲覧アカウント追加</button></form><p><a class="btn secondary" href="/admin/account">自分のアカウント設定</a></p></div><div class="card"><h2>閲覧アカウント一覧</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>ユーザー名</th><th>閲覧可能ボックス</th><th>作成日時</th><th>操作</th></tr></thead><tbody>${viewerRows || '<tr><td colspan="5">まだありません</td></tr>'}</tbody></table></div></div></section><section class="card"><h2>管理者一覧</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>ユーザー名</th><th>作成日時</th></tr></thead><tbody>${adminRows}</tbody></table></div></section></div>
+        <div class="tab-panel" data-tab-panel="tab-push"><section class="grid two"><div class="card"><h2>通知設定</h2>${vapidEnabled ? '<button type="button" class="btn" id="enablePushBtn">このブラウザでPush通知を有効化</button><p class="muted">有効化後、各ボックスの Push ON/OFF を切り替えできます。</p>' : '<p class="notice-info">Push通知は未設定です。下のVAPID設定を保存してください。</p>'}</div><div class="card"><h2>VAPID Key設定</h2><form method="post" action="/admin/push-config"><label>VAPID Subject<input name="vapidSubject" maxlength="300" placeholder="mailto:admin@example.com" value="${escapeHtml(vapidConfig.subject || 'mailto:admin@example.com')}" /></label><label>VAPID Public Key<input name="vapidPublicKey" maxlength="300" value="${escapeHtml(vapidConfig.publicKey || '')}" /></label><label>VAPID Private Key<input name="vapidPrivateKey" maxlength="300" value="${escapeHtml(vapidConfig.privateKey || '')}" /></label><p class="muted">無効化したい場合は公開鍵・秘密鍵を両方空欄にして保存してください。</p><button class="btn" type="submit">VAPID設定を保存</button></form></div></section></div>
         <div class="tab-panel" data-tab-panel="tab-analytics"><section class="grid two"><div class="card"><h2>イベント集計 (30日)</h2><div class="table-wrap"><table><thead><tr><th>イベント</th><th>件数</th></tr></thead><tbody>${analyticsSummary.map((row) => `<tr><td>${escapeHtml(row.event_type)}</td><td>${row.total}</td></tr>`).join('') || '<tr><td colspan="2">データなし</td></tr>'}</tbody></table></div></div><div class="card"><h2>日別アップロード (14日)</h2><div class="table-wrap"><table><thead><tr><th>日付</th><th>件数</th></tr></thead><tbody>${uploadsByDay.map((row) => `<tr><td>${escapeHtml(row.day)}</td><td>${row.total}</td></tr>`).join('') || '<tr><td colspan="2">データなし</td></tr>'}</tbody></table></div></div></section><section class="card"><h2>ボックス別パフォーマンス (30日)</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>タイトル</th><th>閲覧数</th><th>アップロード成功</th><th>CVR</th></tr></thead><tbody>${boxPerformance.map((row) => `<tr><td>${row.id}</td><td>${escapeHtml(row.title)}</td><td>${row.views || 0}</td><td>${row.uploads || 0}</td><td>${row.views ? `${Math.round((row.uploads / row.views) * 1000) / 10}%` : '-'}</td></tr>`).join('') || '<tr><td colspan="5">データなし</td></tr>'}</tbody></table></div></section></div>
         <div class="tab-panel" data-tab-panel="tab-ban"><section class="card"><h2>BAN管理</h2><p class="muted">IP単体BANは行わず、端末識別キー単位で自動BANされます。</p><div class="table-wrap"><table><thead><tr><th>ID</th><th>識別キー</th><th>理由</th><th>実行者</th><th>日時</th><th>操作</th></tr></thead><tbody>${banRows || '<tr><td colspan="6">現在BANはありません</td></tr>'}</tbody></table></div></section></div>
       </section>
@@ -239,7 +248,7 @@ function adminBoxEditPage({ actor, box }) {
 
 function viewerDashboardPage({ actor, boxes, pushMap = {}, vapidEnabled = false }) {
   const rows = boxes.map((box) => `<tr><td>${box.id}</td><td>${escapeHtml(box.title)}</td><td>${box.is_active && !box.is_expired ? '閲覧可能' : '停止/期限切れ'}</td><td><form class="inline-form" method="post" action="/push/boxes/${box.id}/toggle"><button class="btn secondary" type="submit">${pushMap[String(box.id)] ? 'Push ON' : 'Push OFF'}</button></form></td><td><a class="btn secondary" href="/admin/boxes/${box.id}/files">ファイル一覧</a></td></tr>`).join('');
-  return layout({ title: '閲覧ダッシュボード', actor, body: `<section class="card"><h2>通知設定</h2>${vapidEnabled ? '<button type="button" class="btn" id="enablePushBtn">このブラウザでPush通知を有効化</button>' : '<p class="notice-info">Push通知は未設定です。管理者へ問い合わせてください。</p>'}</section><section class="card"><h2>閲覧可能な募集ボックス</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>タイトル</th><th>状態</th><th>通知</th><th>操作</th></tr></thead><tbody>${rows || '<tr><td colspan="5">割り当てがありません</td></tr>'}</tbody></table></div></section>` });
+  return layout({ title: '閲覧ダッシュボード', actor, body: `<section class="tabs" data-tabs><div class="tab-buttons"><button class="btn secondary" type="button" data-tab-target="tab-viewer-boxes">募集ボックス</button><button class="btn secondary" type="button" data-tab-target="tab-viewer-push">通知設定</button></div><div class="tab-panel" data-tab-panel="tab-viewer-boxes"><section class="card"><h2>閲覧可能な募集ボックス</h2><p><a class="btn secondary" href="/viewer/account">アカウント設定</a></p><div class="table-wrap"><table><thead><tr><th>ID</th><th>タイトル</th><th>状態</th><th>通知</th><th>操作</th></tr></thead><tbody>${rows || '<tr><td colspan="5">割り当てがありません</td></tr>'}</tbody></table></div></section></div><div class="tab-panel" data-tab-panel="tab-viewer-push"><section class="card"><h2>通知設定</h2>${vapidEnabled ? '<button type="button" class="btn" id="enablePushBtn">このブラウザでPush通知を有効化</button>' : '<p class="notice-info">Push通知は未設定です。管理者へ問い合わせてください。</p>'}</section></div></section>` });
 }
 
 function boxPublicPage({ actor, box, currentCount }) {
@@ -257,8 +266,15 @@ function boxPublicPage({ actor, box, currentCount }) {
     title: `アップロード: ${box.title}`,
     actor,
     extraHead,
-    body: `<section class="card">${box.header_image_path ? `<img class="box-header" src="/box-assets/${encodeURIComponent(box.header_image_path)}" alt="header" />` : ''}<h2>${escapeHtml(box.title)}</h2><p class="muted">${escapeHtml(box.description || '説明なし')}</p>${box.public_notice ? `<p class="notice-info">${escapeHtml(box.public_notice)}</p>` : ''}<p>許可形式: <span class="kbd">${escapeHtml(box.allowed_extensions || 'すべて許可')}</span> / 最大サイズ: <span class="kbd">${formatFileSize(box.max_file_size_bytes || ((box.max_file_size_mb || 0) * 1024 * 1024))}</span> / 最大数: <span class="kbd">${box.max_files_per_upload}</span> / 現在件数: <span class="kbd">${currentCount}${box.max_total_files ? ` / ${box.max_total_files}` : ''}</span></p><form id="uploadForm" method="post" action="/box/${encodeURIComponent(box.slug)}/upload" enctype="multipart/form-data">${box.password_hash ? '<label>募集ボックスパスワード<input type="password" name="boxPassword" required /></label>' : ''}${box.require_uploader_name ? '<label>送信者名<input name="uploaderName" maxlength="100" required /></label>' : '<label>送信者名（任意）<input name="uploaderName" maxlength="100" /></label>'}${box.require_uploader_note ? '<label>メモ<input name="uploaderNote" maxlength="200" required /></label>' : '<label>メモ（任意）<textarea name="uploaderNote" rows="2" maxlength="200"></textarea></label>'}<label>ファイル<input id="uploadFilesInput" type="file" name="files" multiple required /></label><div id="uploadDropzone" class="upload-dropzone" tabindex="0">ここにファイルをドラッグ&ドロップ</div><ul id="selectedUploadFiles" class="file-list" aria-live="polite"></ul><div class="upload-progress-wrap"><progress id="uploadProgress" max="100" value="0"></progress><span id="uploadProgressText" class="muted">0%</span></div><button class="btn" type="submit">アップロード</button></form></section>`,
+    body: `<section class="card">${box.header_image_path ? `<img class="box-header" src="/box-assets/${encodeURIComponent(box.header_image_path)}" alt="header" />` : ''}<h2>${escapeHtml(box.title)}</h2><p class="muted">${escapeHtml(box.description || '説明なし')}</p>${box.public_notice ? `<p class="notice-info">${escapeHtml(box.public_notice)}</p>` : ''}<p>許可形式: <span class="kbd">${escapeHtml(box.allowed_extensions || 'すべて許可')}</span> / 最大サイズ: <span class="kbd">${formatFileSize(box.max_file_size_bytes || ((box.max_file_size_mb || 0) * 1024 * 1024))}</span></p><form id="uploadForm" method="post" action="/box/${encodeURIComponent(box.slug)}/upload" enctype="multipart/form-data">${box.password_hash ? '<label>募集ボックスパスワード<input type="password" name="boxPassword" required /></label>' : ''}${box.require_uploader_name ? '<label>送信者名<input name="uploaderName" maxlength="100" required /></label>' : '<label>送信者名（任意）<input name="uploaderName" maxlength="100" /></label>'}${box.require_uploader_note ? '<label>メモ<input name="uploaderNote" maxlength="200" required /></label>' : '<label>メモ（任意）<textarea name="uploaderNote" rows="2" maxlength="200"></textarea></label>'}<label>ファイル<input id="uploadFilesInput" type="file" name="files" multiple required /></label><div id="uploadDropzone" class="upload-dropzone" tabindex="0">ここにファイルをドラッグ&ドロップ</div><ul id="selectedUploadFiles" class="file-list" aria-live="polite"></ul><div id="uploadBusyNotice" class="upload-busy" hidden>アップロード中です。ページを閉じずにお待ちください…</div><div class="upload-progress-wrap"><progress id="uploadProgress" max="100" value="0"></progress><span id="uploadProgressText" class="muted">待機中</span></div><button id="uploadSubmitButton" class="btn" type="submit">アップロード</button></form></section>`,
   });
+}
+
+function accountPage({ actor }) {
+  const isAdmin = actor.role === 'admin';
+  const action = isAdmin ? '/admin/account/password' : '/viewer/account/password';
+  const heading = isAdmin ? '管理者アカウント設定' : '閲覧アカウント設定';
+  return layout({ title: heading, actor, body: `<section class="card" data-auto-push-prompt="1"><h2>${heading}</h2><p class="muted">ログイン中ユーザー: ${escapeHtml(actor.username)}</p><button type="button" class="btn secondary" id="enablePushBtn">このブラウザでPush通知を有効化</button><p class="muted">ページ表示時に通知有効化を確認します。</p><h3>パスワード変更</h3><form method="post" action="${action}"><label>現在のパスワード<input type="password" name="currentPassword" required minlength="8" maxlength="128" /></label><label>新しいパスワード<input type="password" name="newPassword" required minlength="8" maxlength="128" /></label><button class="btn" type="submit">変更する</button></form><p><a class="btn secondary" href="${isAdmin ? '/admin' : '/viewer'}">戻る</a></p></section>` });
 }
 
 function uploadDonePage({ actor, box, count }) {
@@ -287,10 +303,12 @@ module.exports = {
   homePage,
   adminRegisterPage,
   adminLoginPage,
+  loginChoicePage,
   viewerLoginPage,
   adminDashboardPage,
   adminBoxEditPage,
   viewerDashboardPage,
+  accountPage,
   boxPublicPage,
   uploadDonePage,
   filesPage,
