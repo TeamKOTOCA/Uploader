@@ -66,9 +66,17 @@ docker compose up -d --build
 ## 10. Push通知
 - `notification_subscriptions`: ブラウザ購読情報
 - `notification_box_settings`: アカウント×ボックスの通知ON/OFF
-- `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` が設定されるとWeb Push送信が有効になります。
+- Web Push用のVAPID鍵は起動時に未設定なら自動生成され、`app_settings` に保存されます。
+- `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` を環境変数で指定した場合は、その値が優先されます。
 
 ## 11. 自動BAN
 - `upload_violations` に失敗イベントを記録し、短時間の失敗連続で `upload_bans` に自動登録します。
 - BAN対象はIPではなく `visitor_key` Cookie による端末識別キーです。
 - 管理画面の BAN管理タブから理由確認と解除が可能です。
+
+
+## 12. OGP
+- `src/views.js` の共通レイアウトで OGP / Twitter Card メタタグを出力します。
+- キャッチコピーは固定で `募集ボックスでファイルを送信`。
+- `OGP_IMAGE_PATH`（デフォルト `/assets/ogp.png`）を絶対URLまたは相対パスで指定可能。
+- 相対パスの場合は `SITE_URL` を先頭に付与してOGP画像URLを生成します。

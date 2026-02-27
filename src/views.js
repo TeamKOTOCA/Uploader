@@ -17,6 +17,29 @@ function renderActorNav(actor) {
   return `<div class="nav-actions"><span>閲覧者: <strong>${escapeHtml(actor.username)}</strong></span><a class="btn secondary" href="/viewer">閲覧ダッシュボード</a><form class="inline-form" method="post" action="/viewer/logout"><button class="btn secondary" type="submit">ログアウト</button></form></div>`;
 }
 
+
+function buildOgpMeta(title) {
+  const siteName = 'Uploader';
+  const copy = '募集ボックスでファイルを送信';
+  const siteUrl = (process.env.SITE_URL || '').trim().replace(/\/$/, '');
+  const ogpImagePath = (process.env.OGP_IMAGE_PATH || '/assets/ogp.png').trim();
+  const ogImage = /^https?:\/\//i.test(ogpImagePath)
+    ? ogpImagePath
+    : `${siteUrl}${ogpImagePath.startsWith('/') ? '' : '/'}${ogpImagePath}`;
+  return [
+    `<meta property="og:type" content="website" />`,
+    `<meta property="og:site_name" content="${escapeHtml(siteName)}" />`,
+    `<meta property="og:title" content="${escapeHtml(title)}" />`,
+    `<meta property="og:description" content="${escapeHtml(copy)}" />`,
+    `<meta property="og:image" content="${escapeHtml(ogImage)}" />`,
+    `<meta name="twitter:card" content="summary_large_image" />`,
+    `<meta name="twitter:title" content="${escapeHtml(title)}" />`,
+    `<meta name="twitter:description" content="${escapeHtml(copy)}" />`,
+    `<meta name="twitter:image" content="${escapeHtml(ogImage)}" />`,
+    '<meta name="description" content="募集ボックスでファイルを送信" />',
+  ].join('\n');
+}
+
 function layout({ title, body, actor = null, extraHead = '' }) {
   return `<!doctype html>
 <html lang="ja">
@@ -25,6 +48,7 @@ function layout({ title, body, actor = null, extraHead = '' }) {
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>${escapeHtml(title)}</title>
 <link rel="stylesheet" href="/assets/styles.css" />
+${buildOgpMeta(title)}
 ${extraHead}
 </head>
 <body>
@@ -57,7 +81,7 @@ function homePage({ actor, boxes }) {
 }
 
 function adminRegisterPage({ actor }) {
-  return layout({ title: '管理者登録', actor, body: `<section class="card"><h2>管理者登録（初回のみ）</h2><p class="muted">管理者アカウントは1件のみ作成できます。</p><form method="post" action="/admin/register"><label>ユーザー名<input name="username" required minlength="3" maxlength="64" pattern="[a-zA-Z0-9_.-]{3,64}" /></label><label>パスワード<input type="password" name="password" required minlength="8" maxlength="128" /></label><button class="btn" type="submit">作成</button></form></section>` });
+  return layout({ title: '管理者登録', actor, body: `<section class="card"><h2>管理者登録（初回のみ）</h2><p class="muted">初回の管理者作成後は、管理画面から管理者アカウントを追加できます。</p><form method="post" action="/admin/register"><label>ユーザー名<input name="username" required minlength="3" maxlength="64" pattern="[a-zA-Z0-9_.-]{3,64}" /></label><label>パスワード<input type="password" name="password" required minlength="8" maxlength="128" /></label><button class="btn" type="submit">作成</button></form></section>` });
 }
 
 function adminLoginPage({ actor }) {
@@ -199,7 +223,7 @@ function adminDashboardPage({ actor, boxes, admins, viewers, pushMap = {}, vapid
         </div>
         <div class="tab-panel" data-tab-panel="tab-boxes"><section class="card"><h2>募集ボックス一覧</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>タイトル</th><th>リンク</th><th>許可形式</th><th>制限</th><th>状態</th><th>操作</th></tr></thead><tbody>${boxRows || '<tr><td colspan="7">まだありません</td></tr>'}</tbody></table></div></section></div>
         <div class="tab-panel" data-tab-panel="tab-create"><section class="grid two"><div class="card"><h2>募集ボックス作成</h2><form method="post" action="/admin/boxes/create" enctype="multipart/form-data">${boxFormFields()}<button class="btn" type="submit">作成</button></form></div></section></div>
-        <div class="tab-panel" data-tab-panel="tab-accounts"><section class="grid two"><div class="card"><h2>アカウント作成</h2><p class="muted">管理者アカウントは初回登録の1件のみです。</p><h3>閲覧アカウント追加</h3><form method="post" action="/admin/viewers/create"><label>ユーザー名<input name="username" required minlength="3" maxlength="64" pattern="[a-zA-Z0-9_.-]{3,64}" /></label><label>パスワード<input type="password" name="password" required minlength="8" maxlength="128" /></label><label>初期割当ボックスID<input type="number" name="boxId" min="1" required /></label><button class="btn" type="submit">閲覧アカウント追加</button></form></div><div class="card"><h2>閲覧アカウント一覧</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>ユーザー名</th><th>閲覧可能ボックス</th><th>作成日時</th><th>追加割当</th></tr></thead><tbody>${viewerRows || '<tr><td colspan="5">まだありません</td></tr>'}</tbody></table></div></div></section><section class="card"><h2>管理者一覧</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>ユーザー名</th><th>作成日時</th></tr></thead><tbody>${adminRows}</tbody></table></div></section></div>
+        <div class="tab-panel" data-tab-panel="tab-accounts"><section class="grid two"><div class="card"><h2>アカウント作成</h2><h3>管理者アカウント追加</h3><form method="post" action="/admin/admins/create"><label>ユーザー名<input name="username" required minlength="3" maxlength="64" pattern="[a-zA-Z0-9_.-]{3,64}" /></label><label>パスワード<input type="password" name="password" required minlength="8" maxlength="128" /></label><button class="btn" type="submit">管理者アカウント追加</button></form><h3>閲覧アカウント追加</h3><form method="post" action="/admin/viewers/create"><label>ユーザー名<input name="username" required minlength="3" maxlength="64" pattern="[a-zA-Z0-9_.-]{3,64}" /></label><label>パスワード<input type="password" name="password" required minlength="8" maxlength="128" /></label><label>初期割当ボックスID<input type="number" name="boxId" min="1" required /></label><button class="btn" type="submit">閲覧アカウント追加</button></form></div><div class="card"><h2>閲覧アカウント一覧</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>ユーザー名</th><th>閲覧可能ボックス</th><th>作成日時</th><th>追加割当</th></tr></thead><tbody>${viewerRows || '<tr><td colspan="5">まだありません</td></tr>'}</tbody></table></div></div></section><section class="card"><h2>管理者一覧</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>ユーザー名</th><th>作成日時</th></tr></thead><tbody>${adminRows}</tbody></table></div></section></div>
         <div class="tab-panel" data-tab-panel="tab-analytics"><section class="grid two"><div class="card"><h2>イベント集計 (30日)</h2><div class="table-wrap"><table><thead><tr><th>イベント</th><th>件数</th></tr></thead><tbody>${analyticsSummary.map((row) => `<tr><td>${escapeHtml(row.event_type)}</td><td>${row.total}</td></tr>`).join('') || '<tr><td colspan="2">データなし</td></tr>'}</tbody></table></div></div><div class="card"><h2>日別アップロード (14日)</h2><div class="table-wrap"><table><thead><tr><th>日付</th><th>件数</th></tr></thead><tbody>${uploadsByDay.map((row) => `<tr><td>${escapeHtml(row.day)}</td><td>${row.total}</td></tr>`).join('') || '<tr><td colspan="2">データなし</td></tr>'}</tbody></table></div></div></section><section class="card"><h2>ボックス別パフォーマンス (30日)</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>タイトル</th><th>閲覧数</th><th>アップロード成功</th><th>CVR</th></tr></thead><tbody>${boxPerformance.map((row) => `<tr><td>${row.id}</td><td>${escapeHtml(row.title)}</td><td>${row.views || 0}</td><td>${row.uploads || 0}</td><td>${row.views ? `${Math.round((row.uploads / row.views) * 1000) / 10}%` : '-'}</td></tr>`).join('') || '<tr><td colspan="5">データなし</td></tr>'}</tbody></table></div></section></div>
         <div class="tab-panel" data-tab-panel="tab-ban"><section class="card"><h2>BAN管理</h2><p class="muted">IP単体BANは行わず、端末識別キー単位で自動BANされます。</p><div class="table-wrap"><table><thead><tr><th>ID</th><th>識別キー</th><th>理由</th><th>実行者</th><th>日時</th><th>操作</th></tr></thead><tbody>${banRows || '<tr><td colspan="6">現在BANはありません</td></tr>'}</tbody></table></div></section></div>
       </section>
